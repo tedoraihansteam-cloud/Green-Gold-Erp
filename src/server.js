@@ -1,10 +1,7 @@
-require('dotenv').config();
-const app = require('./app');
+const app = require('./src/app');
 
-const PORT = process.env.PORT || 4000;
-const { startAutomaticRentalBilling } = require('./services/automaticRentalBilling');
+const PORT = process.env.PORT || 8080;
 
-app.listen(PORT, () => {
-    console.log(`Green Gold ERP API listening on port ${PORT}`);
-    startAutomaticRentalBilling();
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Green Gold ERP API listening on port ${PORT}`);
 });
