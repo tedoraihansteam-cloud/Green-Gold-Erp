@@ -1,0 +1,37 @@
+{
+  "name": "green-gold-erp-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Green Gold ERP - one-click desktop launcher",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.greengold.erp",
+    "productName": "Green Gold ERP",
+    "files": [
+      "main.js",
+      "preload.js",
+      "connection-error.html",
+      "assets/**"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}

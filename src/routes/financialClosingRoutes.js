@@ -1,0 +1,6 @@
+const r=require('express').Router(),c=require('../controllers/financialClosingController');const {requireAuth}=require('../middleware/auth');const {requirePermission}=require('../middleware/rbac');const {asyncHandler}=require('../middleware/errorHandler');r.use(requireAuth);
+r.get('/periods',requirePermission('ACCOUNTS_VIEW'),asyncHandler(c.periods));r.post('/periods/close',requirePermission('ACCOUNTS_APPROVE'),asyncHandler(c.closePeriod));r.post('/periods/:id/reopen',requirePermission('ACCOUNTS_APPROVE'),asyncHandler(c.reopenPeriod));
+r.get('/reconciliations',requirePermission('ACCOUNTS_VIEW'),asyncHandler(c.reconciliations));r.post('/reconciliations',requirePermission('ACCOUNTS_APPROVE'),asyncHandler(c.reconcile));
+r.post('/customer-payments/:businessId/bounce',requirePermission('ACCOUNTS_APPROVE'),asyncHandler(c.bouncePayment));
+r.get('/adjustments',requirePermission('ACCOUNTS_VIEW'),asyncHandler(c.adjustments));r.post('/adjustments',requirePermission('ACCOUNTS_CREATE'),asyncHandler(c.requestAdjustment));r.post('/adjustments/:businessId/review',requirePermission('ACCOUNTS_APPROVE'),asyncHandler(c.reviewAdjustment));
+r.post('/year-end-close',requirePermission('ACCOUNTS_APPROVE'),asyncHandler(c.yearEnd));module.exports=r;

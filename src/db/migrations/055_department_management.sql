@@ -1,0 +1,6 @@
+ALTER TABLE departments ADD COLUMN IF NOT EXISTS business_id TEXT,ADD COLUMN IF NOT EXISTS code TEXT,ADD COLUMN IF NOT EXISTS description TEXT,ADD COLUMN IF NOT EXISTS head_employee_id UUID REFERENCES master_employees(id),ADD COLUMN IF NOT EXISTS cost_center_id UUID REFERENCES cost_centers(id),ADD COLUMN IF NOT EXISTS phone TEXT,ADD COLUMN IF NOT EXISTS email TEXT,ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',ADD COLUMN IF NOT EXISTS operational_settings JSONB NOT NULL DEFAULT '{}',ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+UPDATE departments d SET code=upper(substr(regexp_replace(d.name,'[^A-Za-z0-9]','','g'),1,8))||'-'||substr(d.id::text,1,4) WHERE code IS NULL;
+UPDATE departments d SET business_id='DEPT-'||upper(substr(regexp_replace(d.name,'[^A-Za-z0-9]','','g'),1,6))||'-'||substr(d.id::text,1,8) WHERE business_id IS NULL;
+ALTER TABLE departments ALTER COLUMN business_id SET NOT NULL,ALTER COLUMN code SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_business_id ON departments(business_id);CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_branch_code ON departments(branch_id,code);
+INSERT INTO numbering_sequences(module_code,prefix_template,padding_length,reset_policy) VALUES('DEPARTMENT','DEPT-{YYYY}-',5,'yearly') ON CONFLICT(module_code) DO NOTHING;

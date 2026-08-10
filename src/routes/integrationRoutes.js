@@ -1,0 +1,14 @@
+const r=require('express').Router(),c=require('../controllers/integrationController');
+const {requireAuth}=require('../middleware/auth'),{requirePermission}=require('../middleware/rbac'),{asyncHandler}=require('../middleware/errorHandler');
+r.post('/ingest/:deviceKey',asyncHandler(c.ingestDeviceEvent));
+r.use(requireAuth,requirePermission('USER_MANAGEMENT_VIEW'));
+r.get('/devices',asyncHandler(c.listDevices));
+r.post('/devices',requirePermission('USER_MANAGEMENT_APPROVE'),asyncHandler(c.saveDevice));
+r.post('/alerts/:id/acknowledge',requirePermission('USER_MANAGEMENT_APPROVE'),asyncHandler(c.acknowledgeAlert));
+r.get('/connections',asyncHandler(c.listConnections));
+r.post('/connections',requirePermission('USER_MANAGEMENT_APPROVE'),asyncHandler(c.saveConnection));
+r.post('/connections/:id/test',requirePermission('USER_MANAGEMENT_APPROVE'),asyncHandler(c.testConnection));
+r.delete('/connections/:id',requirePermission('USER_MANAGEMENT_APPROVE'),asyncHandler(c.deleteConnection));
+r.get('/workflows',asyncHandler(c.listWorkflows));
+r.put('/workflows/:workflowKey',requirePermission('USER_MANAGEMENT_APPROVE'),asyncHandler(c.saveWorkflow));
+module.exports=r;

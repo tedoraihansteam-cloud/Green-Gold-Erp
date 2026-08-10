@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: green_gold_erp
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PGPASSWORD:?Set PGPASSWORD in your .env file}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      NODE_ENV: production
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: green_gold_erp
+      PGUSER: postgres
+      PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in your .env file}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in your .env file - a long random string}
+      QR_SIGNING_SECRET: ${QR_SIGNING_SECRET:?Set QR_SIGNING_SECRET in your .env file - a different long random string}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:4000}
+      EXPENSE_AUTO_APPROVE_THRESHOLD: ${EXPENSE_AUTO_APPROVE_THRESHOLD:-5000}
+      BOOTSTRAP_COMPANY_NAME: ${BOOTSTRAP_COMPANY_NAME:-Green Gold Agro Products Ltd}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in your .env file}
+    ports:
+      - "${APP_PORT:-4000}:4000"
+    volumes:
+      - storage_data:/app/storage
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  storage_data:

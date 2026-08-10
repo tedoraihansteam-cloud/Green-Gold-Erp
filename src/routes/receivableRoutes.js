@@ -1,0 +1,12 @@
+const express=require('express');
+const {requireAuth}=require('../middleware/auth');
+const {requirePermission}=require('../middleware/rbac');
+const {asyncHandler}=require('../middleware/errorHandler');
+const c=require('../controllers/receivableController');
+const router=express.Router();
+router.use(requireAuth);
+router.get('/',requirePermission('ACCOUNTS_VIEW'),asyncHandler(c.listReceivables));
+router.get('/customers',requirePermission('ACCOUNTS_VIEW'),asyncHandler(c.customerBalances));
+router.post('/payments',requirePermission('ACCOUNTS_CREATE'),asyncHandler(c.receivePayment));
+router.post('/payments/:businessId/reconcile',requirePermission('ACCOUNTS_APPROVE'),asyncHandler(c.reconcilePayment));
+module.exports=router;

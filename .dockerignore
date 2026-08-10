@@ -1,0 +1,11 @@
+node_modules
+frontend/node_modules
+frontend/dist
+storage/qrcodes/*
+storage/barcodes/*
+storage/uploads/*
+!storage/**/.gitkeep
+.env
+.git
+*.log
+npm-debug.log*

@@ -1,0 +1,1 @@
+const express=require('express');const {requireAuth}=require('../middleware/auth');const {asyncHandler}=require('../middleware/errorHandler');const {summary}=require('../controllers/customerPortalController');const router=express.Router();router.get('/summary',requireAuth,asyncHandler(summary));module.exports=router;

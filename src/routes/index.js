@@ -1,0 +1,51 @@
+const express = require('express');
+const { requireAuth } = require('../middleware/auth');
+const { asyncHandler } = require('../middleware/errorHandler');
+const dashboardController = require('../controllers/dashboardController');
+
+const router = express.Router();
+
+router.use('/auth', require('./authRoutes'));
+router.use('/notices', require('./notificationRoutes'));
+router.use('/org', require('./companyRoutes'));
+router.use('/customers', require('./customerRoutes'));
+router.use('/vendors', require('./vendorRoutes'));
+router.use('/employees', require('./employeeRoutes'));
+router.use('/hr', require('./payrollRoutes'));
+router.use('/budgets', require('./budgetRoutes'));
+router.use('/manufacturing', require('./manufacturingRoutes'));
+router.use('/logistics', require('./logisticsRoutes'));
+router.use('/reports', require('./reportRoutes'));
+router.use('/inventory', require('./inventoryRoutes'));
+router.use('/procurement', require('./procurementRoutes'));
+router.use('/sales', require('./salesRoutes'));
+router.use('/accounts', require('./accountRoutes'));
+router.use('/financial-controls', require('./financialControlRoutes'));
+router.use('/general-ledger', require('./generalLedgerRoutes'));
+router.use('/financial-closing', require('./financialClosingRoutes'));
+router.use('/expenses', require('./expenseRoutes'));
+router.use('/security', require('./securityRoutes'));
+router.use('/cold-storage', require('./coldStorageRoutes'));
+router.use('/roles', require('./roleRoutes'));
+router.use('/users', require('./userRoutes'));
+router.use('/attachments', require('./attachmentRoutes'));
+router.use('/verify', require('./verifyRoutes'));
+router.use('/identifiers', require('./identifierRoutes'));
+router.use('/documents', require('./documentRoutes'));
+router.use('/scan', require('./scanRoutes'));
+router.use('/receivables', require('./receivableRoutes'));
+router.use('/customer-portal', require('./customerPortalRoutes'));
+router.use('/requests',require('./portalRequestRoutes'));
+router.use('/settings',require('./settingsRoutes'));
+router.use('/bills',require('./billRoutes'));
+router.use('/daily-financial-reports',require('./dailyFinancialRoutes'));
+router.use('/bulk-imports',require('./bulkImportRoutes'));
+router.use('/company-settings',require('./companySettingsRoutes'));
+router.use('/integrations',require('./integrationRoutes'));
+router.use('/workforce',require('./workforceRoutes'));
+router.use('/data-corrections',require('./dataCorrectionRoutes'));
+router.use('/search',require('./searchRoutes'));
+
+router.get('/dashboard/summary', requireAuth, asyncHandler(dashboardController.summary));
+
+module.exports = router;

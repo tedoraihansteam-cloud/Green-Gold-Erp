@@ -1,0 +1,114 @@
+:root {
+  --brand-primary: #0B4D3B;
+  --brand-primary-readable: #176C52;
+  --brand-accent: #C9A227;
+  /* Color - named for what they evoke, not just hue */
+  --paddy-900: #14261B;   /* deepest green - sidebar */
+  --paddy-800: #1F3D2E;   /* primary brand green */
+  --paddy-700: #2C5240;
+  --paddy-100: #E4ECE5;   /* pale green tint for hovers/badges */
+  --husk-600: #C89B3C;    /* the "Gold" - primary action accent */
+  --husk-700: #A97F2B;
+  --husk-100: #F6EBD2;    /* pale gold tint */
+  --paper: #F7F5EF;        /* page background - warm, not stark white */
+  --paper-raised: #FFFFFF; /* card background */
+  --ink-900: #1C2019;      /* primary text */
+  --ink-600: #4B5147;      /* secondary text */
+  --ink-400: #8A9184;      /* muted / placeholder / borders */
+  --line: #E3DFD3;         /* hairline border */
+  --rust-600: #B4472C;     /* danger / rejected */
+  --rust-100: #F4E1DA;
+  --moss-600: #4C7A52;     /* success / approved */
+  --moss-100: #E1EBE0;
+  --amber-600: #B8842A;    /* pending / warning */
+  --amber-100: #F3E7CE;
+
+  /* Type */
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-body: 'IBM Plex Sans', -apple-system, sans-serif;
+  --font-data: 'IBM Plex Mono', 'SF Mono', monospace;
+
+  /* Scale */
+  --radius: 6px;
+  --radius-sm: 4px;
+  --shadow-card: 0 1px 2px rgba(28, 32, 25, 0.06);
+
+  /* Semantic interface tokens. Company document branding remains independent. */
+  --background: var(--paper);
+  --surface: var(--paper-raised);
+  --surface-elevated: #FFFFFF;
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-600);
+  --text-muted: var(--ink-400);
+  --border: var(--line);
+  --divider: var(--line);
+  --primary: var(--brand-primary);
+  --primary-hover: #083E30;
+  --primary-active: #062F25;
+  --primary-muted: #E3F0EB;
+  --primary-foreground: #FFFFFF;
+  --accent: var(--brand-accent);
+  --accent-hover: #A9841D;
+  --success: #347A4A;
+  --warning: #9A6816;
+  --danger: #B33B32;
+  --danger-hover: #943129;
+  --info: #276AA5;
+  --sidebar-background: #0D352B;
+  --sidebar-text: #E8F1ED;
+  --sidebar-active: var(--primary);
+  --sidebar-hover: rgba(255,255,255,.08);
+  --card-background: var(--surface);
+  --card-border: var(--border);
+  --input-background: var(--surface);
+  --input-border: var(--border);
+  --input-focus: var(--primary);
+  --table-header: #F2F5F3;
+  --table-hover: #F5F8F6;
+  --chart-1: var(--primary);
+  --chart-2: var(--accent);
+  --chart-3: #3D7F68;
+  --chart-4: #5B78A6;
+  --chart-5: #A66F4A;
+  --focus-ring: var(--primary);
+  --shadow-elevated: 0 12px 32px rgba(17,35,28,.14);
+}
+
+html[data-accent="emerald"] { --primary:#087B5B; --primary-hover:#066548; --primary-active:#064E3B; --primary-muted:#DDF5EC; }
+html[data-accent="blue"] { --primary:#1D5FA7; --primary-hover:#184E89; --primary-active:#153F6D; --primary-muted:#E3EEF9; }
+html[data-accent="indigo"] { --primary:#4B50A8; --primary-hover:#3E438E; --primary-active:#333776; --primary-muted:#E9E9F8; }
+html[data-accent="purple"] { --primary:#75449A; --primary-hover:#60377F; --primary-active:#4D2D66; --primary-muted:#F0E7F5; }
+html[data-accent="rose"] { --primary:#A53F61; --primary-hover:#89344F; --primary-active:#702A41; --primary-muted:#F7E5EB; }
+html[data-accent="orange"] { --primary:#A84C14; --primary-hover:#8C3F10; --primary-active:#71330D; --primary-muted:#F9E9DF; }
+html[data-accent="gold"] { --primary:#806313; --primary-hover:#68510F; --primary-active:#51400C; --primary-muted:#F5EED7; }
+html[data-accent="teal"] { --primary:#08747A; --primary-hover:#075E63; --primary-active:#064B4F; --primary-muted:#DDF1F2; }
+html[data-accent="slate"] { --primary:#465569; --primary-hover:#394657; --primary-active:#2D3745; --primary-muted:#E8EBEF; }
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --background:#101713; --surface:#18221D; --surface-elevated:#202C26;
+  --text-primary:#F1F6F3; --text-secondary:#B7C4BC; --text-muted:#819087;
+  --border:#304038; --divider:#2A3932; --primary-muted:#233B32;
+  --sidebar-background:#0A211A; --card-background:var(--surface); --card-border:var(--border);
+  --input-background:#131C17; --input-border:#3A4B42; --table-header:#1D2923; --table-hover:#202E27;
+  --paper:var(--background); --paper-raised:var(--surface); --ink-900:var(--text-primary);
+  --ink-600:var(--text-secondary); --ink-400:var(--text-muted); --line:var(--border);
+  --paddy-900:var(--sidebar-background); --paddy-100:var(--sidebar-text); --paddy-800:var(--primary);
+  --rust-100:#3B2422; --rust-600:#F0968D; --moss-100:#20382A; --moss-600:#8ED09D; --amber-100:#3B3020; --amber-600:#E9BD69; --husk-100:#3C3320;
+  --shadow-card:0 1px 2px rgba(0,0,0,.28); --shadow-elevated:0 18px 44px rgba(0,0,0,.38);
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"] {
+    color-scheme: dark;
+    --background:#101713; --surface:#18221D; --surface-elevated:#202C26;
+    --text-primary:#F1F6F3; --text-secondary:#B7C4BC; --text-muted:#819087;
+    --border:#304038; --divider:#2A3932; --primary-muted:#233B32;
+    --sidebar-background:#0A211A; --card-background:var(--surface); --card-border:var(--border);
+    --input-background:#131C17; --input-border:#3A4B42; --table-header:#1D2923; --table-hover:#202E27;
+    --paper:var(--background); --paper-raised:var(--surface); --ink-900:var(--text-primary);
+    --ink-600:var(--text-secondary); --ink-400:var(--text-muted); --line:var(--border);
+    --paddy-900:var(--sidebar-background); --paddy-100:var(--sidebar-text); --paddy-800:var(--primary);
+    --rust-100:#3B2422; --rust-600:#F0968D; --moss-100:#20382A; --moss-600:#8ED09D; --amber-100:#3B3020; --amber-600:#E9BD69; --husk-100:#3C3320;
+  }
+}

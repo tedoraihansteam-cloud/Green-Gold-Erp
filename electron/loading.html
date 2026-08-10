@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>Green Gold ERP</title>
+<style>
+  body {
+    margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #14261B; color: #E4ECE5; font-family: -apple-system, 'IBM Plex Sans', sans-serif;
+  }
+  .wrap { text-align: center; }
+  .wordmark { font-family: Georgia, serif; font-style: italic; font-size: 28px; margin-bottom: 18px; }
+  .wordmark .gold { color: #C89B3C; }
+  .spinner {
+    width: 28px; height: 28px; border: 3px solid rgba(228,236,229,0.25); border-top-color: #C89B3C;
+    border-radius: 50%; margin: 0 auto 14px; animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  p { font-size: 13px; color: rgba(228,236,229,0.7); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="wordmark">Green <span class="gold">Gold</span></div>
+    <div class="spinner"></div>
+    <p>Connecting…</p>
+  </div>
+</body>
+</html>

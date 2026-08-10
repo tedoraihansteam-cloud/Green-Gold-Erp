@@ -1,0 +1,2 @@
+async function assertPeriodOpen(client,companyId,date=new Date().toISOString().slice(0,10)){const row=(await client.query(`SELECT status FROM accounting_periods WHERE company_id=$1 AND $2::date BETWEEN period_start AND period_end AND status IN('closed','locked') ORDER BY period_start DESC LIMIT 1`,[companyId,date])).rows[0];if(row)throw Object.assign(new Error(`Accounting period is ${row.status}; posting on ${date} is not allowed`),{statusCode:409});}
+module.exports={assertPeriodOpen};
