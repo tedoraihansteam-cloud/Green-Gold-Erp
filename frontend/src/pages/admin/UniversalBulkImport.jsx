@@ -62,9 +62,15 @@ export default function UniversalBulkImport() {
         catch (error) { setMessage(error.message); }
         finally { setBusy(false); }
     }
+    async function postResults() {
+        setBusy(true);
+        try { const result = await api.post(`/bulk-imports/${active.business_id}/post-results`, {}); loadReview(result.job); setMessage(result.message); reload(); }
+        catch (error) { setMessage(error.message); }
+        finally { setBusy(false); }
+    }
     async function saveReview() {
         setBusy(true);
-        try { const result = await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured || multiDomain ? extractionDraft : undefined }); loadReview(result.job); setMessage(multiDomain ? 'Multi-department extraction review saved safely. No operational ERP data was posted.' : 'Edited review saved and all stock, charge, payment, and due totals were recalculated.'); reload(); }
+        try { const result = await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured || multiDomain ? extractionDraft : undefined }); loadReview(result.job); setMessage(active.final_approved_at ? 'Posting destinations saved. You can retry the failed operational sections now.' : multiDomain ? 'Multi-department extraction review saved safely. No operational ERP data was posted.' : 'Edited review saved and all stock, charge, payment, and due totals were recalculated.'); reload(); }
         catch (error) { setMessage(error.message); }
         finally { setBusy(false); }
     }
@@ -78,6 +84,7 @@ export default function UniversalBulkImport() {
     const multiDomain = extraction.mode === 'multi_domain';
     const context = active?.review_context || {};
     const summary = active?.source_summary || {};
+    const legacyApprovedPendingPosting = Boolean(multiDomain && active?.status === 'submitted' && (active.submission_result?.routed || []).some((item) => !item.status || item.status === 'pending_department_posting'));
 
     return <section className="card">
         <h2>Universal data upload and automation</h2>
@@ -131,7 +138,10 @@ export default function UniversalBulkImport() {
             {multiDomain && ['review', 'pending_approval'].includes(active.status) && <div className="field" style={{ marginTop: 14 }}><label>{active.status === 'review' ? 'Submission note' : 'Approval remarks *'}</label><textarea value={approvalNotes} onChange={(event) => setApprovalNotes(event.target.value)} placeholder={active.status === 'review' ? 'Optional note for the first reviewer' : 'Required remarks for approve, return, or reject'} /></div>}
             {active.status === 'review' && <div className="form-actions"><button className="btn btn-secondary" onClick={removeActive}>Remove review upload</button><button className="btn btn-secondary" disabled={busy} onClick={saveReview}>Save edited review</button><button className="btn btn-primary" disabled={busy} onClick={submit}>{busy ? 'Submitting…' : multiDomain ? 'Submit for layered approval' : 'Approve and submit to departments'}</button></div>}
             {multiDomain && active.status === 'pending_approval' && <div className="form-actions"><button className="btn btn-secondary" disabled={busy} onClick={() => decideApproval('return')}>Return for correction</button><button className="btn btn-danger" disabled={busy} onClick={() => decideApproval('reject')}>Reject</button><button className="btn btn-primary" disabled={busy} onClick={() => decideApproval('approve')}>{busy ? 'Processing…' : `Approve ${context.workflow?.currentStep?.name || 'current layer'}`}</button></div>}
-            {multiDomain && active.status === 'submitted' && <div className="success-banner">All approval layers completed. Selected sections were routed to My Letters & Requests for department posting.</div>}
+            {multiDomain && active.submission_result?.routed?.length > 0 && <div className="card" style={{ padding: 14, marginTop: 14 }}><h3>OPERATIONAL POSTING RESULTS</h3><div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))' }}><div className="stat-card"><div className="label">Posted sections</div><div className="value">{active.submission_result.postedSections || 0}</div></div><div className="stat-card"><div className="label">Failed sections</div><div className="value">{active.submission_result.failedSections || 0}</div></div><div className="stat-card"><div className="label">Posted records</div><div className="value">{active.submission_result.records || 0}</div></div></div><div style={{ overflowX: 'auto' }}><table className="data"><thead><tr><th>Section</th><th>Department</th><th>Status</th><th>Records</th><th>Generated ERP records / error</th></tr></thead><tbody>{active.submission_result.routed.map((item, index) => <tr key={`${item.sectionId}-${index}`}><td>{item.result?.title || item.sectionId}</td><td>{item.department}</td><td><span className={`pill ${item.status === 'posted' ? 'pill-success' : 'pill-danger'}`}>{item.status || 'approved / pending posting'}</span></td><td>{item.records || 0}</td><td>{item.error || (item.result?.generated || item.result?.result?.generated || []).join(', ') || (item.skippedExisting ? 'Already posted; duplicate prevented' : '-')}</td></tr>)}</tbody></table></div></div>}
+            {multiDomain && active.status === 'submitted' && !legacyApprovedPendingPosting && <div className="success-banner">All approval layers completed and all selected records were posted to their operational ERP modules.</div>}
+            {legacyApprovedPendingPosting && <div><div className="error-banner">Approval is complete, but this record was approved before operational posting was enabled. Post it now; the approval history will be preserved.</div><div className="form-actions"><button className="btn btn-primary" disabled={busy} onClick={postResults}>{busy ? 'Posting…' : 'Post approved results now'}</button></div></div>}
+            {multiDomain && ['partially_posted', 'posting_failed'].includes(active.status) && <div><div className="error-banner">Some approved sections could not be posted. Open the failed section, correct its ERP destination, save the destinations, then retry. Successfully posted sections will not be duplicated.</div><div className="form-actions"><button className="btn btn-secondary" disabled={busy} onClick={saveReview}>{busy ? 'Saving…' : 'Save corrected destinations'}</button><button className="btn btn-primary" disabled={busy} onClick={postResults}>{busy ? 'Posting…' : 'Retry failed operational posting'}</button></div></div>}
         </div>}
 
         <div style={{ marginTop: 16 }}><h3>RECENT UPLOADS</h3>{(data?.jobs || []).slice(0, 8).map((job) => <button key={job.business_id} className="btn btn-secondary btn-sm" style={{ margin: '0 6px 6px 0' }} onClick={() => openJob(job.business_id)}>{job.business_id} · {String(job.detected_document_type || job.import_type).replace(/_/g, ' ')} · {job.row_count} records · {job.status}</button>)}</div>
