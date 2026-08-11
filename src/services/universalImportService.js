@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const ExcelJS = require('exceljs');
+const { analyzeMultiDomainFile, recalculateMultiDomainReview } = require('./multiDomainExtractionService');
 
 const FLAT_TARGETS = {
     customer: ['name', 'phone', 'email', 'address', 'customerType'],
@@ -253,13 +254,18 @@ function extractOperationalLedger(sheet) {
     };
 }
 async function analyzeFile(file, requestedType = 'auto') {
+    if (path.basename(file.originalname).startsWith('~$')) throw Object.assign(new Error('This is an Excel temporary lock file. Close Excel and upload the real workbook instead.'), { statusCode: 400 });
     const ext = path.extname(file.originalname).toLowerCase();
     if (ext === '.csv') return analyzeFlat(parseCsv(fs.readFileSync(file.path, 'utf8')), requestedType);
     if (ext === '.json') {
         const parsed = JSON.parse(fs.readFileSync(file.path, 'utf8'));
         return analyzeFlat(Array.isArray(parsed) ? parsed : parsed.rows || [], requestedType);
     }
-    if (!['.xlsx', '.xlsm'].includes(ext)) throw Object.assign(new Error('Supported bulk files are CSV, JSON, XLSX, and XLSM.'), { statusCode: 400 });
+    if (['.xlsx', '.xls', '.xlsm', '.docx'].includes(ext)) {
+        const multiDomain = await analyzeMultiDomainFile(file, requestedType);
+        if (multiDomain) return multiDomain;
+    }
+    if (!['.xlsx', '.xlsm'].includes(ext)) throw Object.assign(new Error('Supported bulk files are CSV, JSON, XLS, XLSX, XLSM, and DOCX.'), { statusCode: 400 });
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(file.path);
     if (!workbook.worksheets.length) throw Object.assign(new Error('The workbook has no worksheets'), { statusCode: 400 });
@@ -351,4 +357,4 @@ function recalculateStructuredReview(input) {
     return { extractionResult: { ...input, customer, products, goodsReceipts, deliveries, payments, reconciliation, editedAt: new Date().toISOString() }, sourceSummary, routingPlan, validationErrors };
 }
 
-module.exports = { analyzeFile, suggestMapping, FLAT_TARGETS, normalizeProductName, recalculateStructuredReview };
+module.exports = { analyzeFile, suggestMapping, FLAT_TARGETS, normalizeProductName, recalculateStructuredReview, recalculateMultiDomainReview };

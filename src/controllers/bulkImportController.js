@@ -2,7 +2,7 @@ const fs = require('fs');
 const { query, withTransaction } = require('../config/db');
 const { generateNextId } = require('../services/numberingEngine');
 const { generateForEntitySafe } = require('../services/qrBarcodeService');
-const { analyzeFile, recalculateStructuredReview } = require('../services/universalImportService');
+const { analyzeFile, recalculateStructuredReview, recalculateMultiDomainReview } = require('../services/universalImportService');
 const { recordStockMovement } = require('./inventoryController');
 const { recordAccountTransaction } = require('./accountController');
 const { createReceivable } = require('../services/receivableService');
@@ -25,6 +25,26 @@ function validateFlatRows(job, map) {
     return errors.slice(0, 200);
 }
 async function reviewContext(job, companyId) {
+    if (job.extraction_result?.mode === 'multi_domain') {
+        const [warehouses, locations, accounts, customers, vendors, employees, departments, sites, duplicateUploads] = await Promise.all([
+            query(`SELECT business_id,name FROM warehouses WHERE company_id=$1 AND deleted_at IS NULL ORDER BY name`, [companyId]),
+            query(`SELECT sl.business_id,sl.name,sl.location_type,w.business_id warehouse_business_id,w.name warehouse_name FROM storage_locations sl JOIN warehouses w ON w.id=sl.warehouse_id WHERE sl.company_id=$1 AND sl.deleted_at IS NULL ORDER BY w.name,sl.name`, [companyId]),
+            query(`SELECT business_id,name,account_type,current_balance FROM accounts WHERE company_id=$1 AND deleted_at IS NULL AND status='active' ORDER BY account_type,name`, [companyId]),
+            query(`SELECT business_id,name,phone FROM master_customers WHERE company_id=$1 AND deleted_at IS NULL ORDER BY name`, [companyId]),
+            query(`SELECT business_id,name,phone FROM master_vendors WHERE company_id=$1 AND deleted_at IS NULL ORDER BY name`, [companyId]),
+            query(`SELECT business_id,full_name,designation FROM master_employees WHERE company_id=$1 AND deleted_at IS NULL ORDER BY full_name`, [companyId]),
+            query(`SELECT d.business_id,d.name,b.name branch_name FROM departments d JOIN branches b ON b.id=d.branch_id WHERE b.company_id=$1 AND d.status='active' ORDER BY b.name,d.name`, [companyId]),
+            query(`SELECT id,name,site_type,address FROM company_sites WHERE company_id=$1 ORDER BY name`, [companyId]),
+            job.source_summary?.sourceHash ? query(`SELECT business_id,original_name,status,created_at FROM bulk_import_jobs WHERE company_id=$1 AND id<>$2 AND source_summary->>'sourceHash'=$3 ORDER BY created_at DESC LIMIT 10`, [companyId, job.id, job.source_summary.sourceHash]) : Promise.resolve({ rows: [] })
+        ]);
+        return { ...job, review_context: {
+            warehouses: warehouses.rows, locations: locations.rows, accounts: accounts.rows,
+            customers: customers.rows, vendors: vendors.rows, employees: employees.rows,
+            departments: departments.rows, sites: sites.rows, duplicateUploads: duplicateUploads.rows,
+            postingLocked: true,
+            postingMessage: 'Demo safety lock is active. Saving this review does not create or change ERP operational records.'
+        } };
+    }
     if (job.extraction_result?.mode !== 'structured') {
         if (job.import_type !== 'customer') return job;
         const { rows: customers } = await query(`SELECT business_id,name,phone FROM master_customers WHERE company_id=$1 AND deleted_at IS NULL ORDER BY name`, [companyId]);
@@ -60,7 +80,7 @@ async function upload(req, res) {
     if (!req.file) return res.status(400).json({ error: 'File is required' });
     try {
         const requestedType = req.body.importType || 'auto';
-        if (!['auto', 'customer', 'product', 'vendor', 'stock_report', 'raw_material_report'].includes(requestedType)) return res.status(400).json({ error: 'Select auto-detect, customer, product, vendor, stock report, or raw-material report' });
+        if (!['auto', 'customer', 'product', 'vendor', 'staff', 'payroll', 'accounts', 'stock_report', 'raw_material_report', 'document'].includes(requestedType)) return res.status(400).json({ error: 'Select a supported master-data, department-data, report, or auto-detect option' });
         const analysis = await analyzeFile(req.file, requestedType);
         if (analysis.previewRows.length > 10000) return res.status(400).json({ error: 'A bulk file can contain at most 10,000 rows' });
         const businessId = await generateNextId('BULK_IMPORT');
@@ -77,7 +97,7 @@ async function upload(req, res) {
     }
 }
 async function list(req, res) {
-    const { rows } = await query(`SELECT id,business_id,import_type,detected_document_type,original_name,status,detected_columns,field_mapping,validation_errors,source_summary,routing_plan,created_at,submitted_at,CASE WHEN jsonb_array_length(preview_rows)>0 THEN jsonb_array_length(preview_rows) ELSE COALESCE((source_summary->>'goodsReceipts')::int,0) END row_count FROM bulk_import_jobs WHERE company_id=$1 ORDER BY created_at DESC`, [req.user.company_id]);
+    const { rows } = await query(`SELECT id,business_id,import_type,detected_document_type,original_name,status,detected_columns,field_mapping,validation_errors,source_summary,routing_plan,created_at,submitted_at,CASE WHEN jsonb_array_length(preview_rows)>0 THEN jsonb_array_length(preview_rows) ELSE COALESCE((source_summary->>'records')::int,(source_summary->>'goodsReceipts')::int,0) END row_count FROM bulk_import_jobs WHERE company_id=$1 ORDER BY created_at DESC`, [req.user.company_id]);
     res.json({ jobs: rows });
 }
 async function get(req, res) {
@@ -88,7 +108,9 @@ async function get(req, res) {
 async function updateReview(req, res) {
     const current = (await query(`SELECT * FROM bulk_import_jobs WHERE business_id=$1 AND company_id=$2 AND status='review'`, [req.params.businessId, req.user.company_id])).rows[0];
     if (!current) return res.status(404).json({ error: 'Review job not found' });
-    const revised = req.body.extractionResult && current.extraction_result?.mode === 'structured' ? recalculateStructuredReview(req.body.extractionResult) : null;
+    let revised = null;
+    if (req.body.extractionResult && current.extraction_result?.mode === 'structured') revised = recalculateStructuredReview(req.body.extractionResult);
+    if (req.body.extractionResult && current.extraction_result?.mode === 'multi_domain') revised = recalculateMultiDomainReview(req.body.extractionResult);
     const { rows } = await query(`UPDATE bulk_import_jobs SET field_mapping=COALESCE($1,field_mapping),submission_options=COALESCE($2,submission_options),extraction_result=COALESCE($3::jsonb,extraction_result),source_summary=COALESCE($4::jsonb,source_summary),routing_plan=COALESCE($5::jsonb,routing_plan),validation_errors=COALESCE($6::jsonb,validation_errors) WHERE id=$7 AND status='review' RETURNING *`, [req.body.fieldMapping || null, req.body.submissionOptions || null, revised ? JSON.stringify(revised.extractionResult) : null, revised ? JSON.stringify(revised.sourceSummary) : null, revised ? JSON.stringify(revised.routingPlan) : null, revised ? JSON.stringify(revised.validationErrors) : null, current.id]);
     if (!rows.length) return res.status(404).json({ error: 'Review job not found' });
     res.json({ job: await reviewContext(rows[0], req.user.company_id) });
@@ -225,6 +247,7 @@ async function submit(req, res) {
         const { rows } = await client.query(`SELECT * FROM bulk_import_jobs WHERE business_id=$1 AND company_id=$2 AND status='review' FOR UPDATE`, [req.params.businessId, req.user.company_id]);
         if (!rows.length) throw Object.assign(new Error('Review job not found'), { statusCode: 404 });
         const job = rows[0];
+        if (job.extraction_result?.mode === 'multi_domain') throw Object.assign(new Error('This multi-department extraction is review-only for the demo. Save the review now; final posting remains locked until you confirm the detected results.'), { statusCode: 409 });
         const outcome = job.extraction_result?.mode === 'structured' ? await submitStructured(client, job, req.user) : await submitFlat(client, job, req.user);
         if (outcome.errors) { await client.query(`UPDATE bulk_import_jobs SET validation_errors=$1::jsonb WHERE id=$2`, [JSON.stringify(outcome.errors), job.id]); return outcome; }
         const compactResult = { summary: outcome.summary, customerBusinessId: outcome.customerBusinessId || null };
