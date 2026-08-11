@@ -22,6 +22,13 @@ const excelDate = (value) => {
 };
 const safeId = (value) => norm(value).slice(0, 55) || crypto.randomUUID().slice(0, 8);
 const fingerprint = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function periodKey(value) {
+    const source = String(value || '').toLowerCase();
+    const months = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+    const month = months.findIndex((name) => source.includes(name) || source.includes(name.slice(0, 3)));
+    const year = source.match(/\b(20\d{2})\b/)?.[1];
+    return month >= 0 && year ? `${year}-${String(month + 1).padStart(2, '0')}` : '';
+}
 const rowValues = (row) => (row || []).map((value) => text(value));
 const valueAt = (rows, row, col) => rows[row]?.[col];
 
@@ -30,7 +37,8 @@ function question(key, label, options, recommended = '', help = '') {
 }
 function makeSection({ type, title, sheetName, range, confidence, records, columns, summary, data = null, questions = [], selected = true, postingMode = 'review_only', warnings = [] }) {
     const section = { id: `${safeId(sheetName)}-${safeId(type)}-${safeId(title)}`, type, title, sheetName, range, confidence, selected, postingMode, records, columns, summary, data, questions, warnings };
-    section.fingerprint = fingerprint({ type, records });
+    section.periodKey = periodKey(`${sheetName} ${title}`);
+    section.fingerprint = fingerprint({ type, periodKey: section.periodKey, records });
     return section;
 }
 
@@ -267,10 +275,11 @@ function buildMultiResult(originalName,sourceHash,sheets,sections) {
 }
 function recalculateMultiDomainReview(input) {
     if(!input||input.mode!=='multi_domain')throw Object.assign(new Error('Multi-domain extraction is required'),{statusCode:400});
-    const sections=(input.sections||[]).map((section)=>({...section,selected:Boolean(section.selected),questions:(section.questions||[]).map((q)=>({...q,value:text(q.value)}))})); const validationErrors=[];
+    const seenFingerprints=new Map(),duplicates=[];
+    const sections=(input.sections||[]).map((section)=>{const current={...section,selected:Boolean(section.selected),questions:(section.questions||[]).map((q)=>({...q,value:text(q.value)}))};delete current.duplicateOf;current.periodKey=periodKey(`${current.sheetName} ${current.title}`);current.fingerprint=fingerprint({type:current.type,periodKey:current.periodKey,records:current.records||[]});if(seenFingerprints.has(current.fingerprint)){current.selected=false;current.duplicateOf=seenFingerprints.get(current.fingerprint);duplicates.push({sectionId:current.id,duplicateOf:current.duplicateOf});}else seenFingerprints.set(current.fingerprint,current.id);return current;}); const validationErrors=[];
     for(const section of sections.filter((s)=>s.selected)){for(const q of section.questions||[]){if(q.required&&!q.value)validationErrors.push({field:`${section.id}.${q.key}`,message:`${section.title}: ${q.label}`});}}
     for(const entity of input.entityCandidates||[]){if(entity.selected&&!entity.role)validationErrors.push({severity:'warning',field:`entity.${entity.id}`,message:`Confirm whether ${entity.name} is a customer, vendor, staff member, or another party.`});}
-    const extractionResult={...input,sections,reviewedAt:new Date().toISOString()}; const sourceSummary={sourceHash:input.sourceHash,sheets:input.workbook?.sheetCount||0,sections:sections.length,selectedSections:sections.filter((s)=>s.selected).length,records:sections.filter((s)=>s.selected).reduce((sum,s)=>sum+(s.records||[]).length,0),entityCandidates:(input.entityCandidates||[]).length,duplicates:(input.duplicates||[]).length,sectionTypes:Object.fromEntries([...new Set(sections.map((s)=>s.type))].map((type)=>[type,sections.filter((s)=>s.type===type&&s.selected).length]))};
+    const extractionResult={...input,sections,duplicates,reviewedAt:new Date().toISOString()}; const sourceSummary={sourceHash:input.sourceHash,sheets:input.workbook?.sheetCount||0,sections:sections.length,selectedSections:sections.filter((s)=>s.selected).length,records:sections.filter((s)=>s.selected).reduce((sum,s)=>sum+(s.records||[]).length,0),entityCandidates:(input.entityCandidates||[]).length,duplicates:duplicates.length,sectionTypes:Object.fromEntries([...new Set(sections.map((s)=>s.type))].map((type)=>[type,sections.filter((s)=>s.type===type&&s.selected).length]))};
     const routingPlan=[...new Set(sections.filter((s)=>s.selected).map((s)=>s.type))].map((type)=>({department:type.includes('payroll')?'HR / Accounts':type==='account_transactions'?'Accounts':type.includes('receiving')?'Inventory / Cold Storage':type.includes('customer')?'Customer Management / Accounts':'Management Review',recordType:type,count:sections.filter((s)=>s.type===type&&s.selected).reduce((sum,s)=>sum+(s.records||[]).length,0),action:'Stage selected records for destination review; no operational posting occurs until destination approval'}));
     return {extractionResult,sourceSummary,routingPlan,validationErrors};
 }

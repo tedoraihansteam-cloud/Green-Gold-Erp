@@ -16,6 +16,7 @@ export default function UniversalBulkImport() {
     const [extractionDraft, setExtractionDraft] = useState(null);
     const [message, setMessage] = useState('');
     const [busy, setBusy] = useState(false);
+    const [approvalNotes, setApprovalNotes] = useState('');
 
     const loadReview = (job) => {
         setActive(job);
@@ -39,10 +40,13 @@ export default function UniversalBulkImport() {
         finally { setBusy(false); }
     }
     async function submit() {
-        if (multiDomain) return setMessage('Final posting is locked for this demo. Save the extraction review; no live ERP data will be changed until you confirm the results.');
         setBusy(true);
         try {
             await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured || multiDomain ? extractionDraft : undefined });
+            if (multiDomain) {
+                const approval = await api.post(`/bulk-imports/${active.business_id}/approval/submit`, { notes: approvalNotes });
+                loadReview(approval.job); setApprovalNotes(''); setMessage(approval.message); reload(); return;
+            }
             const result = await api.post(`/bulk-imports/${active.business_id}/submit`, {});
             setMessage(`${result.imported} approved records and units were routed successfully. Customer, stock, charges, dues, payments, receipts, and identities are synchronized.`);
             setActive(null); reload();
@@ -50,6 +54,13 @@ export default function UniversalBulkImport() {
             setMessage(error.message);
             try { const refreshed = await api.get(`/bulk-imports/${active.business_id}`); loadReview(refreshed.job); } catch { /* keep the current review */ }
         } finally { setBusy(false); }
+    }
+    async function decideApproval(decision) {
+        if (!approvalNotes.trim()) return setMessage('Remarks are required for every approval decision.');
+        setBusy(true);
+        try { const result = await api.post(`/bulk-imports/${active.business_id}/approval/decision`, { decision, notes: approvalNotes }); loadReview(result.job); setApprovalNotes(''); setMessage(result.message); reload(); }
+        catch (error) { setMessage(error.message); }
+        finally { setBusy(false); }
     }
     async function saveReview() {
         setBusy(true);
@@ -116,8 +127,11 @@ export default function UniversalBulkImport() {
                 <div style={{ overflowX: 'auto' }}><table className="data"><thead><tr><th>Row</th>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.slice(0, 10).map((row, index) => <tr key={index}><td>{index + 2}</td>{columns.map((column) => <td key={column}>{row[column]}</td>)}</tr>)}</tbody></table></div>
                 <p className="hint">Showing 10 of {rows.length} rows. Final submission imports the complete validated file.</p>
             </>}
-            {multiDomain && <div className="success-banner"><strong>Demo control:</strong> save your extraction review below. Final department posting is disabled until you confirm this demo.</div>}
-            {active.status === 'review' && <div className="form-actions"><button className="btn btn-secondary" onClick={removeActive}>Remove review upload</button><button className="btn btn-secondary" disabled={busy} onClick={saveReview}>Save edited review</button><button className="btn btn-primary" disabled={busy} onClick={submit}>{busy ? 'Posting approved records…' : 'Approve and submit to departments'}</button></div>}
+            {multiDomain && context.workflow && <div className="card" style={{ padding: 14, marginTop: 14 }}><h3>LAYERED APPROVAL WORKFLOW</h3><div className="form-grid">{(context.workflow.steps || []).map((step, index) => <div className="card" style={{ padding: 12 }} key={`${step.name}-${index}`}><strong>{index + 1}. {step.name}</strong><div className="hint">{step.department} · {step.permission}</div><span className="pill">{active.status === 'submitted' || index < context.workflow.currentStepIndex ? 'approved' : active.status === 'pending_approval' && index === context.workflow.currentStepIndex ? 'current' : 'waiting'}</span></div>)}</div>{(context.workflow.events || []).length > 0 && <div style={{ overflowX: 'auto', marginTop: 10 }}><table className="data"><thead><tr><th>Layer</th><th>Action</th><th>Person</th><th>Remarks</th><th>Time</th></tr></thead><tbody>{context.workflow.events.map((event, index) => <tr key={index}><td>{event.step_name}</td><td>{event.action}</td><td>{event.display_name || event.username}</td><td>{event.notes || '-'}</td><td>{new Date(event.created_at).toLocaleString()}</td></tr>)}</tbody></table></div>}</div>}
+            {multiDomain && ['review', 'pending_approval'].includes(active.status) && <div className="field" style={{ marginTop: 14 }}><label>{active.status === 'review' ? 'Submission note' : 'Approval remarks *'}</label><textarea value={approvalNotes} onChange={(event) => setApprovalNotes(event.target.value)} placeholder={active.status === 'review' ? 'Optional note for the first reviewer' : 'Required remarks for approve, return, or reject'} /></div>}
+            {active.status === 'review' && <div className="form-actions"><button className="btn btn-secondary" onClick={removeActive}>Remove review upload</button><button className="btn btn-secondary" disabled={busy} onClick={saveReview}>Save edited review</button><button className="btn btn-primary" disabled={busy} onClick={submit}>{busy ? 'Submitting…' : multiDomain ? 'Submit for layered approval' : 'Approve and submit to departments'}</button></div>}
+            {multiDomain && active.status === 'pending_approval' && <div className="form-actions"><button className="btn btn-secondary" disabled={busy} onClick={() => decideApproval('return')}>Return for correction</button><button className="btn btn-danger" disabled={busy} onClick={() => decideApproval('reject')}>Reject</button><button className="btn btn-primary" disabled={busy} onClick={() => decideApproval('approve')}>{busy ? 'Processing…' : `Approve ${context.workflow?.currentStep?.name || 'current layer'}`}</button></div>}
+            {multiDomain && active.status === 'submitted' && <div className="success-banner">All approval layers completed. Selected sections were routed to My Letters & Requests for department posting.</div>}
         </div>}
 
         <div style={{ marginTop: 16 }}><h3>RECENT UPLOADS</h3>{(data?.jobs || []).slice(0, 8).map((job) => <button key={job.business_id} className="btn btn-secondary btn-sm" style={{ margin: '0 6px 6px 0' }} onClick={() => openJob(job.business_id)}>{job.business_id} · {String(job.detected_document_type || job.import_type).replace(/_/g, ' ')} · {job.row_count} records · {job.status}</button>)}</div>

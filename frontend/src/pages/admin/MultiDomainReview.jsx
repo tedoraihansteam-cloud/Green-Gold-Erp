@@ -32,7 +32,7 @@ export default function MultiDomainReview({ extraction, setExtraction, context }
     }));
 
     return <div>
-        <div className="success-banner"><strong>Safe extraction demo</strong><div>{context.postingMessage || 'Review is saved without posting operational data.'}</div></div>
+        <div className="success-banner"><strong>Controlled data extraction</strong><div>{context.postingMessage || 'Selected data requires every configured approval layer before department routing.'}</div></div>
         {(context.duplicateUploads || []).length > 0 && <div className="error-banner"><strong>Exact file duplicate detected</strong>{context.duplicateUploads.map((item) => <div key={item.business_id}>{item.original_name} · {item.business_id} · {item.status}</div>)}</div>}
 
         <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(145px,1fr))', margin: '14px 0' }}>
@@ -50,7 +50,7 @@ export default function MultiDomainReview({ extraction, setExtraction, context }
                         <div><label style={{ display: 'flex', gap: 9, alignItems: 'center' }}><input type="checkbox" checked={Boolean(section.selected)} onChange={(event) => updateSection(section.id, { selected: event.target.checked })} /><strong>{section.title}</strong></label><div className="hint">{section.sheetName} · {label(section.type)} · {(section.records?.length || 0).toLocaleString()} records · {Math.round(Number(section.confidence || 0) * 100)}% confidence</div></div>
                         <button className="btn btn-secondary btn-sm" onClick={() => setOpenSection(isOpen ? '' : section.id)}>{isOpen ? 'Close details' : 'Review details'}</button>
                     </div>
-                    {section.duplicateOf && <div className="error-banner">Duplicate of section {section.duplicateOf}; it is deselected by default.</div>}
+                    {section.duplicateOf && <div className="error-banner">Possible duplicate of section {section.duplicateOf} for the same reporting period; verify it before selecting.</div>}
                     {isOpen && <div>
                         {(section.warnings || []).map((warning, index) => <div className="error-banner" key={index}>{warning}</div>)}
                         {(section.questions || []).map((question) => <div className="field" key={question.key}><label>{question.label} *</label><select value={question.value || ''} onChange={(event) => answer(section.id, question.key, event.target.value)}><option value="">Select an answer</option>{(question.options || []).map((option) => <option value={option} key={option}>{label(option)}</option>)}</select>{question.help && <div className="hint">{question.help}</div>}</div>)}
