@@ -13,6 +13,28 @@ function deleteTemporaryUpload(filePath) {
     try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); }
     catch (error) { console.error(`Temporary import cleanup failed for ${filePath}:`, error.message); }
 }
+async function registerGeneratedCodes(items = []) {
+    const seen = new Set();
+    for (const item of items) {
+        if (!item?.type || !item?.code) continue;
+        const key = `${item.type}:${item.code}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        await generateForEntitySafe(item.type, item.code);
+    }
+}
+function routedGeneratedEntities(routed = []) {
+    const entities = [];
+    for (const route of routed) {
+        const result = route.result?.result || route.result || {};
+        for (const item of result.generated || []) {
+            if (item && typeof item === 'object') entities.push(item);
+            else if (item && result.targetType) entities.push({ type: result.targetType, code: item });
+        }
+        if (result.targetType && result.targetId) entities.push({ type: result.targetType, code: result.targetId });
+    }
+    return entities;
+}
 
 function validateFlatRows(job, map) {
     const errors = [];
@@ -96,6 +118,7 @@ async function upload(req, res) {
              VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14) RETURNING *`,
             [businessId, req.user.company_id, analysis.importType, req.file.originalname, '', JSON.stringify(analysis.columns), JSON.stringify(analysis.previewRows), analysis.fieldMapping, JSON.stringify(analysis.validationErrors), analysis.detectedDocumentType, JSON.stringify(analysis.extractionResult), JSON.stringify(analysis.routingPlan), JSON.stringify(analysis.sourceSummary), req.user.id]
         );
+        await generateForEntitySafe('BULK_IMPORT', businessId);
         res.status(201).json({ job: await reviewContext(rows[0], req.user.company_id) });
     } catch (error) {
         throw error;
@@ -231,7 +254,12 @@ async function postPayrollSection(client, job, section, user) {
         if (!salaryExists) await client.query(`INSERT INTO employee_salary_history(company_id,employee_id,basic,house_rent,medical,transport,special_allowance,effective_date,set_by,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [user.company_id, employee.row.id, basic, house, medical, transport, special, period.effectiveDate, user.id, `Imported from ${job.business_id} / ${section.sheetName}`]);
         postedItems++;
     }
-    return run ? { targetType: 'PAYROLL_RUN', targetId: run.business_id, records: postedItems, createdEmployees, generated: [run.business_id] } : { targetType: 'EMPLOYEE_SALARY_HISTORY', targetId: section.periodKey, records: postedItems, createdEmployees, generated: [] };
+    const employeeCodes = [];
+    for (const record of section.records || []) {
+        const employee = (await client.query(`SELECT business_id FROM master_employees WHERE company_id=$1 AND deleted_at IS NULL AND lower(full_name)=lower($2) LIMIT 1`, [user.company_id, record.employeeName])).rows[0];
+        if (employee) employeeCodes.push({ type: 'EMPLOYEE', code: employee.business_id });
+    }
+    return run ? { targetType: 'PAYROLL_RUN', targetId: run.business_id, records: postedItems, createdEmployees, generated: [{ type: 'PAYROLL_RUN', code: run.business_id }, ...employeeCodes] } : { targetType: 'EMPLOYEE_SALARY_HISTORY', targetId: section.periodKey, records: postedItems, createdEmployees, generated: employeeCodes };
 }
 async function postSecuritySection(client, job, section, user) {
     const options = section.postingOptions || {}, target = questionAnswer(section, 'postingTarget') || 'vendor_bill', vendorChoice = questionAnswer(section, 'vendorMatch') || 'create_new_vendor';
@@ -246,7 +274,7 @@ async function postSecuritySection(client, job, section, user) {
     if (existing) return { targetType: 'BILL_SUBMISSION', targetId: existing.business_id, records: section.records?.length || 0, generated: [existing.business_id], matchedExisting: true };
     const businessId = await generateNextId('BILL_SUBMISSION');
     await client.query(`INSERT INTO bill_submissions(business_id,company_id,submitter_user_id,vendor_id,bill_number,bill_date,category,payee,amount,description,related_type,related_id,status,submitted_at,claimant_type,expense_breakdown) VALUES($1,$2,$3,$4,$5,CURRENT_DATE,'OUTSOURCED_SECURITY',$6,$7,$8,'BULK_IMPORT_SECTION',$9,'submitted',now(),'vendor',$10::jsonb)`, [businessId, user.company_id, user.id, vendor.row.id, `${job.business_id}-${section.periodKey || section.sheetName}`, vendor.row.name, amount, `Imported outsourced security payroll from ${section.sheetName}`, section.id, JSON.stringify(section.records || [])]);
-    return { targetType: 'BILL_SUBMISSION', targetId: businessId, records: section.records?.length || 0, createdVendor: vendor.created, generated: [businessId] };
+    return { targetType: 'BILL_SUBMISSION', targetId: businessId, records: section.records?.length || 0, createdVendor: vendor.created, generated: [{ type: 'BILL_SUBMISSION', code: businessId }, ...(vendor.created ? [{ type: 'VENDOR', code: vendor.row.business_id }] : [])] };
 }
 async function postAccountSection(client, job, section, user) {
     const options = section.postingOptions || {}, target = questionAnswer(section, 'postingTarget') || 'draft_for_accounts_review', accountMatch = questionAnswer(section, 'accountMatch') || 'ask_user_to_select_account';
@@ -278,7 +306,7 @@ async function postRawReceivingSection(client, job, section, user) {
     for (const record of section.records || []) {
         const external = `${job.business_id}:${section.id}:${record.sourceRow}`;
         const existing = (await client.query(`SELECT business_id FROM product_batches WHERE company_id=$1 AND source_reference=$2 LIMIT 1`, [user.company_id, external])).rows[0];
-        if (existing) { generated.push(existing.business_id); continue; }
+        if (existing) { generated.push({ type: 'PRODUCT_BATCH', code: existing.business_id }); continue; }
         const product = await ensureProduct(client, user, record.productName, record.unit || 'pcs', 'Imported receiving');
         const batchBusinessId = await generateNextId('PRODUCT_BATCH'), quantity = numeric(record.quantity || record.totalLots);
         const batch = (await client.query(`INSERT INTO product_batches(business_id,company_id,product_id,owner_customer_id,lot_number,source_reference,received_quantity,available_quantity,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$7,'available',$8) RETURNING *`, [batchBusinessId, user.company_id, product.row.id, owner?.row.id || null, record.externalReference || null, external, quantity, user.id])).rows[0];
@@ -286,7 +314,10 @@ async function postRawReceivingSection(client, job, section, user) {
         if (location) await client.query(`INSERT INTO batch_location_balances(batch_id,location_id,quantity) VALUES($1,$2,$3) ON CONFLICT(batch_id,location_id) DO UPDATE SET quantity=batch_location_balances.quantity+EXCLUDED.quantity`, [batch.id, location.id, quantity]);
         const grnBusinessId = await generateNextId('GOODS_RECEIPT');
         await client.query(`INSERT INTO goods_receipts(business_id,company_id,batch_id,customer_id,warehouse_id,received_quantity,condition_notes,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9::date,CURRENT_DATE))`, [grnBusinessId, user.company_id, batch.id, owner?.row.id || null, warehouse.id, quantity, `Imported ${record.totalKg || 0} kg; vehicle ${record.vehicleNumber || '-'}`, user.id, record.receivedDate || null]);
-        generated.push(batchBusinessId, grnBusinessId); posted++;
+        generated.push({ type: 'PRODUCT_BATCH', code: batchBusinessId }, { type: 'GOODS_RECEIPT', code: grnBusinessId });
+        if (product.created) generated.push({ type: 'PRODUCT', code: product.row.business_id });
+        if (owner?.created) generated.push({ type: 'CUSTOMER', code: owner.row.business_id });
+        posted++;
     }
     return { targetType: 'WAREHOUSE', targetId: warehouse.business_id, records: posted, generated };
 }
@@ -300,9 +331,10 @@ async function postBalanceSummarySection(client, job, section, user) {
         const sourceId = `${job.business_id}:${section.id}:${record.sourceRow}`;
         if ((await client.query(`SELECT 1 FROM customer_receivables WHERE source_type='BULK_IMPORT_OPENING' AND source_id=$1`, [sourceId])).rows.length) continue;
         const receivable = await createReceivable(client, { companyId: user.company_id, customerId: customer.row.id, sourceType: 'BULK_IMPORT_OPENING', sourceId, description: `Imported opening due from ${section.sheetName}`, amount: due, dueDate: new Date().toISOString().slice(0, 10) });
-        generated.push(receivable.id); posted++;
+        if (customer.created) generated.push({ type: 'CUSTOMER', code: customer.row.business_id });
+        posted++;
     }
-    return { targetType: 'CUSTOMER_RECEIVABLE', targetId: generated[0] || null, records: posted, createdCustomers, generated };
+    return { targetType: 'CUSTOMER_RECEIVABLE', targetId: null, records: posted, createdCustomers, generated };
 }
 async function postCustomerLedgerSection(client, job, section, user) {
     const options = section.postingOptions || {}, data = JSON.parse(JSON.stringify(section.data || {})), warehouseChoice = questionAnswer(section, 'warehouse'), customerChoice = questionAnswer(section, 'customerMatch'), entityRole = questionAnswer(section, 'entityRole');
@@ -315,7 +347,7 @@ async function postCustomerLedgerSection(client, job, section, user) {
     const account = (data.payments || []).length ? await resolveSelected(client, 'accounts', options.accountBusinessId, user.company_id, `AND deleted_at IS NULL AND status='active'`) : null;
     const pseudoJob = { ...job, extraction_result: data, validation_errors: [], submission_options: { customerBusinessId: options.customerBusinessId || '', warehouseBusinessId: warehouse?.business_id || '', locationBusinessId: options.locationBusinessId || '', accountBusinessId: account?.business_id || '', confirmAdjustments: true } };
     const outcome = await submitStructured(client, pseudoJob, user); if (outcome.errors) throw Object.assign(new Error(outcome.errors.map((item) => item.message).join('; ')), { statusCode: 422 });
-    return { targetType: 'CUSTOMER', targetId: outcome.customerBusinessId, records: outcome.imported, generated: outcome.generated?.map((item) => item.code) || [], summary: outcome.summary };
+    return { targetType: 'CUSTOMER', targetId: outcome.customerBusinessId, records: outcome.imported, generated: outcome.generated || [], summary: outcome.summary };
 }
 async function postMultiDomainSection(client, job, section, user) {
     if (section.type === 'employee_payroll') return postPayrollSection(client, job, section, user);
@@ -384,6 +416,7 @@ async function decideApproval(req, res) {
         return { job: updated, action: failed ? 'posting_failed' : 'posted', step, routed };
     });
     await logAction({ actorUserId: req.user.id, action: `BULK_IMPORT_${result.action.toUpperCase()}`, entityType: 'BULK_IMPORT', entityId: req.params.businessId, after: { notes, routed: result.routed?.length || 0 } });
+    await registerGeneratedCodes(routedGeneratedEntities(result.routed));
     res.json({ job: await reviewContext(result.job, req.user.company_id), action: result.action, nextStep: result.nextStep || null, routed: result.routed || [], message: result.action === 'posted' ? 'All approval layers completed and selected records were posted to their ERP modules.' : result.action === 'posting_failed' ? 'Approval completed, but one or more sections need destination correction before retrying.' : result.action === 'advanced' ? `Approved and moved to ${result.nextStep.name}` : `Import ${result.action}` });
 }
 async function postApprovedResults(req, res) {
@@ -398,6 +431,7 @@ async function postApprovedResults(req, res) {
         return { job: updated, routed, summary };
     });
     await logAction({ actorUserId: req.user.id, action: 'BULK_IMPORT_OPERATIONAL_POST_RETRIED', entityType: 'BULK_IMPORT', entityId: req.params.businessId, after: result.summary });
+    await registerGeneratedCodes(routedGeneratedEntities(result.routed));
     res.json({ job: await reviewContext(result.job, req.user.company_id), ...result.summary, message: result.summary.failedSections ? `${result.summary.postedSections} sections posted; ${result.summary.failedSections} still require correction.` : `${result.summary.postedSections} sections posted successfully.` });
 }
 async function submitFlat(client, job, user) {
@@ -541,7 +575,7 @@ async function submit(req, res) {
         return outcome;
     });
     if (result.errors) return res.status(422).json({ error: 'Complete the review requirements before final submission', validationErrors: result.errors });
-    for (const item of result.generated) await generateForEntitySafe(item.type, item.code);
+    await registerGeneratedCodes(result.generated);
     res.json({ imported: result.imported, summary: result.summary, customerBusinessId: result.customerBusinessId, message: 'Approved records were routed to their relevant departments' });
 }
 function template(req, res) {

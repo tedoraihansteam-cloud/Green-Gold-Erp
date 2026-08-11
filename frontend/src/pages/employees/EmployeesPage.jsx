@@ -18,6 +18,8 @@ export default function EmployeesPage() {
     const [form, setForm] = useState({ fullName:'',designation:'',phone:'',email:'',joinDate:'',branchId:'',departmentId:'' });
 
     const [salaryEmployee, setSalaryEmployee] = useState(null);
+    const [statusEmployee, setStatusEmployee] = useState(null);
+    const [statusForm, setStatusForm] = useState({ status: 'active', statusReason: '' });
     const { data: historyData, reload: reloadHistory } = useApi(salaryEmployee ? `/hr/employees/${salaryEmployee.business_id}/salary-history` : null);
     const [salaryForm, setSalaryForm] = useState({ templateBusinessId: '', basic: '', houseRent: '', medical: '', transport: '', food: '', specialAllowance: '', providentFundPercent: '', effectiveDate: new Date().toISOString().slice(0, 10), notes: '' });
 
@@ -42,6 +44,22 @@ export default function EmployeesPage() {
         setSalaryEmployee(emp);
         setSalaryForm({ templateBusinessId: '', basic: '', houseRent: '', medical: '', transport: '', food: '', specialAllowance: '', providentFundPercent: '', effectiveDate: new Date().toISOString().slice(0, 10), notes: '' });
         setFormError('');
+    };
+
+    const openStatus = (emp) => {
+        setStatusEmployee(emp);
+        setStatusForm({ status: emp.status || 'active', statusReason: '' });
+        setFormError('');
+    };
+
+    const handleStatusSubmit = async (e) => {
+        e.preventDefault();
+        setBusy(true); setFormError('');
+        try {
+            await api.put(`/employees/${statusEmployee.business_id}`, statusForm);
+            setStatusEmployee(null);
+            reload();
+        } catch (err) { setFormError(err.message); } finally { setBusy(false); }
     };
 
     const applyTemplate = (templateBusinessId) => {
@@ -85,9 +103,10 @@ export default function EmployeesPage() {
                             {key:'site_name',label:'Location',render:r=>r.site_name||r.branch_name||'Not assigned'},
                             { key: 'phone', label: 'Phone' },
                             { key: 'status', label: 'Status', render: (r) => <Pill status={r.status} /> },
-                            { key: 'actions', label: '', render: (r) => can('HR_EDIT') && (
+                            { key: 'actions', label: 'Actions', render: (r) => can('HR_EDIT') && <span style={{display:'flex',gap:6,flexWrap:'wrap'}}>
                                 <button type="button" className="btn btn-secondary btn-sm" onClick={() => openSalary(r)}>Salary</button>
-                            )}
+                                <button type="button" className="btn btn-secondary btn-sm" onClick={() => openStatus(r)}>Active / inactive</button>
+                            </span>}
                         ]}
                         rows={employees}
                         emptyMessage="No employees yet."
@@ -162,6 +181,18 @@ export default function EmployeesPage() {
                             <button type="button" className="btn btn-secondary" onClick={() => setSalaryEmployee(null)}>Close</button>
                             <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Set salary'}</button>
                         </div>
+                    </form>
+                </Modal>
+            )}
+
+            {statusEmployee && (
+                <Modal title={`Employee status — ${statusEmployee.full_name}`} onClose={() => setStatusEmployee(null)}>
+                    {formError && <div className="error-banner">{formError}</div>}
+                    <form onSubmit={handleStatusSubmit}>
+                        <div className="field"><label>Status *</label><select required value={statusForm.status} onChange={(e)=>setStatusForm((s)=>({...s,status:e.target.value}))}><option value="active">Active</option><option value="inactive">Inactive</option><option value="on_leave">On leave</option><option value="terminated">Terminated</option></select></div>
+                        <div className="field"><label>Effective reason *</label><textarea required value={statusForm.statusReason} onChange={(e)=>setStatusForm((s)=>({...s,statusReason:e.target.value}))} placeholder="Explain why this status is being changed" /></div>
+                        <p className="card-subtitle">Inactive and terminated employees remain in payroll, attendance, task, voucher, and audit history but are excluded from new active operations.</p>
+                        <div className="form-actions"><button type="button" className="btn btn-secondary" onClick={()=>setStatusEmployee(null)}>Cancel</button><button className="btn btn-primary" disabled={busy}>{busy?'Saving…':'Save status'}</button></div>
                     </form>
                 </Modal>
             )}

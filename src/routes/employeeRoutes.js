@@ -10,5 +10,6 @@ router.use(requireAuth);
 router.get('/', requirePermission('HR_VIEW'), asyncHandler(employeeController.listEmployees));
 router.post('/', requirePermission('HR_CREATE'), asyncHandler(employeeController.createEmployee));
 router.get('/:businessId', requirePermission('HR_VIEW'), asyncHandler(employeeController.getEmployee));
+router.put('/:businessId', requirePermission('HR_EDIT'), asyncHandler(employeeController.updateEmployee));
 
 module.exports = router;

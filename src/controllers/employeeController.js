@@ -43,4 +43,18 @@ async function getEmployee(req, res) {
     res.json({ employee: rows[0] });
 }
 
-module.exports = { createEmployee, listEmployees, getEmployee };
+async function updateEmployee(req, res) {
+    const { fullName, designation, phone, email, branchId, departmentId, joinDate, status, statusReason } = req.body;
+    if (status !== undefined && !['active', 'inactive', 'on_leave', 'terminated'].includes(status)) return res.status(400).json({ error: 'Status must be active, inactive, on_leave, or terminated' });
+    if (status !== undefined && !String(statusReason || '').trim()) return res.status(400).json({ error: 'A reason is required when changing employee status' });
+    const before = (await query(`SELECT * FROM master_employees WHERE business_id=$1 AND company_id=$2 AND deleted_at IS NULL`, [req.params.businessId, req.user.company_id])).rows[0];
+    if (!before) return res.status(404).json({ error: 'Employee not found' });
+    const { rows } = await query(
+        `UPDATE master_employees SET full_name=COALESCE($1,full_name),designation=$2,phone=$3,email=$4,branch_id=$5,department_id=$6,join_date=$7,status=COALESCE($8,status) WHERE id=$9 RETURNING *`,
+        [fullName || null, designation ?? before.designation, phone ?? before.phone, email ?? before.email, branchId === '' ? null : branchId ?? before.branch_id, departmentId === '' ? null : departmentId ?? before.department_id, joinDate === '' ? null : joinDate ?? before.join_date, status || null, before.id]
+    );
+    await logAction({ actorUserId: req.user.id, action: status && status !== before.status ? 'EMPLOYEE_STATUS_CHANGED' : 'EMPLOYEE_UPDATED', entityType: 'EMPLOYEE', entityId: before.business_id, before, after: { ...rows[0], statusReason: statusReason || null } });
+    res.json({ employee: rows[0] });
+}
+
+module.exports = { createEmployee, listEmployees, getEmployee, updateEmployee };
