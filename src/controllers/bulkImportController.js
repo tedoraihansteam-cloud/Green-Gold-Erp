@@ -6,6 +6,7 @@ const { analyzeFile, recalculateStructuredReview, recalculateMultiDomainReview }
 const { recordStockMovement } = require('./inventoryController');
 const { recordAccountTransaction } = require('./accountController');
 const { createReceivable } = require('../services/receivableService');
+const { logAction } = require('../services/auditLogger');
 
 function deleteTemporaryUpload(filePath) {
     if (!filePath) return;
@@ -37,12 +38,18 @@ async function reviewContext(job, companyId) {
             query(`SELECT id,name,site_type,address FROM company_sites WHERE company_id=$1 ORDER BY name`, [companyId]),
             job.source_summary?.sourceHash ? query(`SELECT business_id,original_name,status,created_at FROM bulk_import_jobs WHERE company_id=$1 AND id<>$2 AND source_summary->>'sourceHash'=$3 ORDER BY created_at DESC LIMIT 10`, [companyId, job.id, job.source_summary.sourceHash]) : Promise.resolve({ rows: [] })
         ]);
+        const [workflow, events] = await Promise.all([
+            query(`SELECT enabled,display_name,approval_steps FROM workflow_definitions WHERE company_id=$1 AND workflow_key='universal_data_import'`, [companyId]),
+            query(`SELECT e.step_index,e.step_name,e.action,e.notes,e.created_at,u.username,u.display_name FROM bulk_import_approval_events e JOIN users u ON u.id=e.actor_user_id WHERE e.job_id=$1 ORDER BY e.created_at`, [job.id])
+        ]);
+        const approvalSteps = (job.approval_snapshot?.length ? job.approval_snapshot : workflow.rows[0]?.approval_steps) || [];
         return { ...job, review_context: {
             warehouses: warehouses.rows, locations: locations.rows, accounts: accounts.rows,
             customers: customers.rows, vendors: vendors.rows, employees: employees.rows,
             departments: departments.rows, sites: sites.rows, duplicateUploads: duplicateUploads.rows,
-            postingLocked: true,
-            postingMessage: 'Demo safety lock is active. Saving this review does not create or change ERP operational records.'
+            workflow: { enabled: workflow.rows[0]?.enabled !== false, displayName: workflow.rows[0]?.display_name || 'Universal data import', steps: approvalSteps, currentStepIndex: job.approval_step_index || 0, currentStep: approvalSteps[job.approval_step_index || 0] || null, events: events.rows },
+            postingLocked: false,
+            postingMessage: 'Selected data will be routed only after every configured approval layer signs it.'
         } };
     }
     if (job.extraction_result?.mode !== 'structured') {
@@ -114,6 +121,83 @@ async function updateReview(req, res) {
     const { rows } = await query(`UPDATE bulk_import_jobs SET field_mapping=COALESCE($1,field_mapping),submission_options=COALESCE($2,submission_options),extraction_result=COALESCE($3::jsonb,extraction_result),source_summary=COALESCE($4::jsonb,source_summary),routing_plan=COALESCE($5::jsonb,routing_plan),validation_errors=COALESCE($6::jsonb,validation_errors) WHERE id=$7 AND status='review' RETURNING *`, [req.body.fieldMapping || null, req.body.submissionOptions || null, revised ? JSON.stringify(revised.extractionResult) : null, revised ? JSON.stringify(revised.sourceSummary) : null, revised ? JSON.stringify(revised.routingPlan) : null, revised ? JSON.stringify(revised.validationErrors) : null, current.id]);
     if (!rows.length) return res.status(404).json({ error: 'Review job not found' });
     res.json({ job: await reviewContext(rows[0], req.user.company_id) });
+}
+async function submitForApproval(req, res) {
+    const result = await withTransaction(async (client) => {
+        const job = (await client.query(`SELECT * FROM bulk_import_jobs WHERE business_id=$1 AND company_id=$2 AND status='review' FOR UPDATE`, [req.params.businessId, req.user.company_id])).rows[0];
+        if (!job || job.extraction_result?.mode !== 'multi_domain') throw Object.assign(new Error('A multi-department review job is required'), { statusCode: 409 });
+        const revised = recalculateMultiDomainReview(job.extraction_result);
+        const blocking = revised.validationErrors.filter((error) => error.severity !== 'warning');
+        if (blocking.length) {
+            await client.query(`UPDATE bulk_import_jobs SET validation_errors=$1::jsonb WHERE id=$2`, [JSON.stringify(revised.validationErrors), job.id]);
+            return { validationErrors: revised.validationErrors };
+        }
+        if (!revised.sourceSummary.selectedSections) throw Object.assign(new Error('Select at least one section before submitting'), { statusCode: 400 });
+        const workflow = (await client.query(`SELECT * FROM workflow_definitions WHERE company_id=$1 AND workflow_key='universal_data_import'`, [req.user.company_id])).rows[0];
+        if (!workflow?.enabled) throw Object.assign(new Error('Universal data import approval workflow is not enabled'), { statusCode: 409 });
+        const steps = (workflow.approval_steps || []).filter((step) => step.required !== false);
+        if (!steps.length) throw Object.assign(new Error('Configure at least one required approval layer in Workflow & individual duties'), { statusCode: 409 });
+        const updated = (await client.query(`UPDATE bulk_import_jobs SET status='pending_approval',approval_step_index=0,approval_snapshot=$1::jsonb,submitted_for_approval_by=$2,submitted_for_approval_at=now(),approval_notes=NULL,validation_errors=$3::jsonb,extraction_result=$4::jsonb,source_summary=$5::jsonb,routing_plan=$6::jsonb WHERE id=$7 RETURNING *`, [JSON.stringify(steps), req.user.id, JSON.stringify(revised.validationErrors), JSON.stringify(revised.extractionResult), JSON.stringify(revised.sourceSummary), JSON.stringify(revised.routingPlan), job.id])).rows[0];
+        await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,0,$2,'submitted',$3,$4)`, [job.id, steps[0].name, req.body.notes || null, req.user.id]);
+        return { job: updated, nextStep: steps[0] };
+    });
+    if (result.validationErrors) return res.status(422).json({ error: 'Complete required routing questions before approval submission', validationErrors: result.validationErrors });
+    await logAction({ actorUserId: req.user.id, action: 'BULK_IMPORT_APPROVAL_SUBMITTED', entityType: 'BULK_IMPORT', entityId: req.params.businessId });
+    res.json({ job: await reviewContext(result.job, req.user.company_id), nextStep: result.nextStep, message: `Submitted to ${result.nextStep.name}` });
+}
+function sectionDepartment(type) {
+    if (type.includes('payroll')) return 'HR';
+    if (type === 'account_transactions') return 'ACCOUNTS';
+    if (type.includes('receiving')) return 'INVENTORY';
+    if (type.includes('customer')) return 'CUSTOMER MANAGEMENT';
+    return 'MANAGEMENT';
+}
+async function routeApprovedMultiDomain(client, job, user) {
+    const sections = (job.extraction_result?.sections || []).filter((section) => section.selected);
+    const routed = [];
+    for (const section of sections) {
+        const department = sectionDepartment(section.type);
+        const requestBusinessId = await generateNextId('PORTAL_REQUEST');
+        const details = { importBusinessId: job.business_id, sectionId: section.id, type: section.type, sourceSheet: section.sheetName, periodKey: section.periodKey || null, recordCount: section.records?.length || 0, summary: section.summary || {}, questions: section.questions || [] };
+        const request = (await client.query(`INSERT INTO portal_requests(business_id,company_id,requester_user_id,request_type,department,subject,body,status,submitted_at,details) VALUES($1,$2,$3,'DATA_IMPORT',$4,$5,$6,'submitted',now(),$7::jsonb) RETURNING *`, [requestBusinessId, user.company_id, user.id, department, `Approved data import: ${section.title}`, `Review and post ${section.records?.length || 0} extracted records from ${section.sheetName}.`, JSON.stringify(details)])).rows[0];
+        await client.query(`INSERT INTO bulk_import_postings(job_id,record_type,external_key,target_entity_type,target_entity_id,status,details) VALUES($1,$2,$3,'PORTAL_REQUEST',$4,'pending_department_posting',$5::jsonb) ON CONFLICT(job_id,record_type,external_key) DO NOTHING`, [job.id, section.type, section.fingerprint, request.business_id, JSON.stringify(details)]);
+        routed.push({ sectionId: section.id, department, requestBusinessId: request.business_id, records: section.records?.length || 0 });
+    }
+    return routed;
+}
+async function decideApproval(req, res) {
+    const { decision, notes } = req.body;
+    if (!['approve', 'reject', 'return'].includes(decision) || !String(notes || '').trim()) return res.status(400).json({ error: 'Decision and remarks are required' });
+    const result = await withTransaction(async (client) => {
+        const job = (await client.query(`SELECT * FROM bulk_import_jobs WHERE business_id=$1 AND company_id=$2 AND status='pending_approval' FOR UPDATE`, [req.params.businessId, req.user.company_id])).rows[0];
+        if (!job) throw Object.assign(new Error('Pending approval import was not found'), { statusCode: 409 });
+        const steps = job.approval_snapshot || [], index = Number(job.approval_step_index || 0), step = steps[index];
+        if (!step) throw Object.assign(new Error('The current approval layer is not configured'), { statusCode: 409 });
+        if (!req.permissions.has(step.permission)) throw Object.assign(new Error(`This layer requires ${step.permission}`), { statusCode: 403 });
+        if (step.assigneeUserId && step.assigneeUserId !== req.user.id) throw Object.assign(new Error(`This layer is assigned to another authorized person`), { statusCode: 403 });
+        if (decision === 'reject') {
+            const updated = (await client.query(`UPDATE bulk_import_jobs SET status='rejected',rejected_by=$1,rejected_at=now(),approval_notes=$2 WHERE id=$3 RETURNING *`, [req.user.id, notes, job.id])).rows[0];
+            await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,$2,$3,'rejected',$4,$5)`, [job.id, index, step.name, notes, req.user.id]);
+            return { job: updated, action: 'rejected', step };
+        }
+        if (decision === 'return') {
+            const updated = (await client.query(`UPDATE bulk_import_jobs SET status='review',approval_step_index=0,approval_snapshot='[]'::jsonb,approval_notes=$1 WHERE id=$2 RETURNING *`, [notes, job.id])).rows[0];
+            await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,$2,$3,'returned',$4,$5)`, [job.id, index, step.name, notes, req.user.id]);
+            return { job: updated, action: 'returned', step };
+        }
+        await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,$2,$3,'approved',$4,$5)`, [job.id, index, step.name, notes, req.user.id]);
+        if (index < steps.length - 1) {
+            const updated = (await client.query(`UPDATE bulk_import_jobs SET approval_step_index=$1,approval_notes=$2 WHERE id=$3 RETURNING *`, [index + 1, notes, job.id])).rows[0];
+            return { job: updated, action: 'advanced', step, nextStep: steps[index + 1] };
+        }
+        const routed = await routeApprovedMultiDomain(client, job, req.user);
+        const summary = { selectedSections: routed.length, records: routed.reduce((sum, item) => sum + item.records, 0), routed };
+        const updated = (await client.query(`UPDATE bulk_import_jobs SET status='submitted',final_approved_by=$1,final_approved_at=now(),approval_notes=$2,submission_result=$3::jsonb WHERE id=$4 RETURNING *`, [req.user.id, notes, JSON.stringify(summary), job.id])).rows[0];
+        await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,$2,$3,'routed',$4,$5)`, [job.id, index, step.name, `${notes} Routed ${routed.length} section(s).`, req.user.id]);
+        return { job: updated, action: 'routed', step, routed };
+    });
+    await logAction({ actorUserId: req.user.id, action: `BULK_IMPORT_${result.action.toUpperCase()}`, entityType: 'BULK_IMPORT', entityId: req.params.businessId, after: { notes, routed: result.routed?.length || 0 } });
+    res.json({ job: await reviewContext(result.job, req.user.company_id), action: result.action, nextStep: result.nextStep || null, routed: result.routed || [], message: result.action === 'routed' ? 'All approval layers completed; selected sections were routed to their departments.' : result.action === 'advanced' ? `Approved and moved to ${result.nextStep.name}` : `Import ${result.action}` });
 }
 async function submitFlat(client, job, user) {
     const map = job.field_mapping;
@@ -247,7 +331,7 @@ async function submit(req, res) {
         const { rows } = await client.query(`SELECT * FROM bulk_import_jobs WHERE business_id=$1 AND company_id=$2 AND status='review' FOR UPDATE`, [req.params.businessId, req.user.company_id]);
         if (!rows.length) throw Object.assign(new Error('Review job not found'), { statusCode: 404 });
         const job = rows[0];
-        if (job.extraction_result?.mode === 'multi_domain') throw Object.assign(new Error('This multi-department extraction is review-only for the demo. Save the review now; final posting remains locked until you confirm the detected results.'), { statusCode: 409 });
+        if (job.extraction_result?.mode === 'multi_domain') throw Object.assign(new Error('Submit this multi-department extraction through its configured layered approval workflow.'), { statusCode: 409 });
         const outcome = job.extraction_result?.mode === 'structured' ? await submitStructured(client, job, req.user) : await submitFlat(client, job, req.user);
         if (outcome.errors) { await client.query(`UPDATE bulk_import_jobs SET validation_errors=$1::jsonb WHERE id=$2`, [JSON.stringify(outcome.errors), job.id]); return outcome; }
         const compactResult = { summary: outcome.summary, customerBusinessId: outcome.customerBusinessId || null };
@@ -271,4 +355,4 @@ async function remove(req, res) {
     res.json({ message: 'Review import removed' });
 }
 
-module.exports = { upload, list, get, updateMapping: updateReview, submit, template, remove };
+module.exports = { upload, list, get, updateMapping: updateReview, submitForApproval, decideApproval, submit, template, remove };
