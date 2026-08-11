@@ -142,6 +142,8 @@ async function updateReview(req, res) {
     if (req.body.extractionResult && current.extraction_result?.mode === 'structured') revised = recalculateStructuredReview(req.body.extractionResult);
     if (req.body.extractionResult && current.extraction_result?.mode === 'multi_domain') {
         let requested = req.body.extractionResult;
+        const originalSections = new Map((current.extraction_result.sections || []).map((section) => [section.id, section]));
+        requested = { ...requested, sections: (requested.sections || []).map((section) => ({ ...section, sourceSnapshot: section.sourceSnapshot || originalSections.get(section.id)?.sourceSnapshot || originalSections.get(section.id)?.records || [] })) };
         if (current.final_approved_at) {
             const requestedSections = new Map((requested.sections || []).map((section) => [section.id, section]));
             requested = {
@@ -157,6 +159,7 @@ async function updateReview(req, res) {
     const editableStatuses = current.final_approved_at ? ['partially_posted', 'posting_failed'] : ['review'];
     const { rows } = await query(`UPDATE bulk_import_jobs SET field_mapping=COALESCE($1,field_mapping),submission_options=COALESCE($2,submission_options),extraction_result=COALESCE($3::jsonb,extraction_result),source_summary=COALESCE($4::jsonb,source_summary),routing_plan=COALESCE($5::jsonb,routing_plan),validation_errors=COALESCE($6::jsonb,validation_errors) WHERE id=$7 AND status=ANY($8::text[]) RETURNING *`, [req.body.fieldMapping || null, req.body.submissionOptions || null, revised ? JSON.stringify(revised.extractionResult) : null, revised ? JSON.stringify(revised.sourceSummary) : null, revised ? JSON.stringify(revised.routingPlan) : null, revised ? JSON.stringify(revised.validationErrors) : null, current.id, editableStatuses]);
     if (!rows.length) return res.status(404).json({ error: 'Review job not found' });
+    if (revised?.extractionResult?.mode === 'multi_domain') await logAction({ actorUserId: req.user.id, action: 'BULK_IMPORT_MANUAL_REVIEW_SAVED', entityType: 'BULK_IMPORT', entityId: req.params.businessId, after: { manualSections: revised.extractionResult.sections.filter((section) => section.manualMode).map((section) => ({ id: section.id, mismatches: section.manualReview?.mismatches?.length || 0, manualRows: section.manualReview?.manualRows || 0, overrideConfirmed: !!section.manualOverride?.confirmed, overrideReason: section.manualOverride?.reason || null })), manualEntities: revised.extractionResult.entityCandidates.filter((entity) => entity.manualEntry).map((entity) => ({ name: entity.name, role: entity.role, matchBusinessId: entity.matchBusinessId || null })) } });
     res.json({ job: await reviewContext(rows[0], req.user.company_id) });
 }
 async function submitForApproval(req, res) {
@@ -350,6 +353,7 @@ async function postCustomerLedgerSection(client, job, section, user) {
     return { targetType: 'CUSTOMER', targetId: outcome.customerBusinessId, records: outcome.imported, generated: outcome.generated || [], summary: outcome.summary };
 }
 async function postMultiDomainSection(client, job, section, user) {
+    if (section.type === 'manual_data_entry') return { targetType: 'BULK_IMPORT_REFERENCE', targetId: section.id, records: section.records?.length || 0, generated: [], referenceOnly: true };
     if (section.type === 'employee_payroll') return postPayrollSection(client, job, section, user);
     if (section.type === 'outsourced_security_payroll') return postSecuritySection(client, job, section, user);
     if (section.type === 'account_transactions') return postAccountSection(client, job, section, user);
@@ -358,9 +362,19 @@ async function postMultiDomainSection(client, job, section, user) {
     if (section.type === 'customer_stock_rental_ledger') return postCustomerLedgerSection(client, job, section, user);
     throw Object.assign(new Error(`No operational posting adapter exists for ${section.type}`), { statusCode: 422 });
 }
+async function postManualEntities(client, job, user) {
+    const generated = [];
+    for (const entity of (job.extraction_result?.entityCandidates || []).filter((item) => item.selected && item.manualEntry && !['ignore', 'other', 'external_person'].includes(item.role))) {
+        if (entity.role === 'customer' || entity.role === 'both') { const result = await ensureCustomer(client, user, entity.name, entity.matchBusinessId); if (result.created) generated.push({ type: 'CUSTOMER', code: result.row.business_id }); }
+        if (entity.role === 'vendor' || entity.role === 'both') { const result = await ensureVendor(client, user, entity.name, entity.matchBusinessId); if (result.created) generated.push({ type: 'VENDOR', code: result.row.business_id }); }
+        if (entity.role === 'staff') { const result = await ensureEmployee(client, user, { employeeName: entity.name, designation: entity.designation || '' }, { departmentBusinessId: entity.departmentBusinessId }); if (result.created) generated.push({ type: 'EMPLOYEE', code: result.row.business_id }); }
+    }
+    return generated;
+}
 async function routeApprovedMultiDomain(client, job, user) {
     const sections = (job.extraction_result?.sections || []).filter((section) => section.selected);
-    const routed = [];
+    const manualEntities = await postManualEntities(client, job, user);
+    const routed = manualEntities.length ? [{ sectionId: 'manual-entities', department: 'MASTER DATA', status: 'posted', records: manualEntities.length, result: { title: 'Manually defined entities', targetType: 'MASTER_DATA', generated: manualEntities } }] : [];
     for (let index = 0; index < sections.length; index++) {
         const section = sections[index], savepoint = `import_section_${index}`;
         const department = sectionDepartment(section.type);
