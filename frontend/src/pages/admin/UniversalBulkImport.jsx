@@ -5,6 +5,10 @@ import StructuredReviewEditor from './StructuredReviewEditor';
 import MultiDomainReview from './MultiDomainReview';
 
 const money = (value) => `৳${Number(value || 0).toLocaleString()}`;
+const reviewExtractionPayload = (extraction) => ({
+    ...extraction,
+    sections: (extraction?.sections || []).map(({ sourceSnapshot, manualReview, ...section }) => section)
+});
 
 export default function UniversalBulkImport() {
     const { data, reload } = useApi('/bulk-imports');
@@ -42,7 +46,7 @@ export default function UniversalBulkImport() {
     async function submit() {
         setBusy(true);
         try {
-            await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured || multiDomain ? extractionDraft : undefined });
+            await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured || multiDomain ? (multiDomain ? reviewExtractionPayload(extractionDraft) : extractionDraft) : undefined });
             if (multiDomain) {
                 const approval = await api.post(`/bulk-imports/${active.business_id}/approval/submit`, { notes: approvalNotes });
                 loadReview(approval.job); setApprovalNotes(''); setMessage(approval.message); reload(); return;
@@ -70,7 +74,7 @@ export default function UniversalBulkImport() {
     }
     async function saveReview() {
         setBusy(true);
-        try { const result = await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured || multiDomain ? extractionDraft : undefined }); loadReview(result.job); setMessage(active.final_approved_at ? 'Posting destinations saved. You can retry the failed operational sections now.' : multiDomain ? 'Multi-department extraction review saved safely. No operational ERP data was posted.' : 'Edited review saved and all stock, charge, payment, and due totals were recalculated.'); reload(); }
+        try { const result = await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured || multiDomain ? (multiDomain ? reviewExtractionPayload(extractionDraft) : extractionDraft) : undefined }); loadReview(result.job); setMessage(active.final_approved_at ? 'Posting destinations saved. You can retry the failed operational sections now.' : multiDomain ? 'Multi-department extraction review saved safely. No operational ERP data was posted.' : 'Edited review saved and all stock, charge, payment, and due totals were recalculated.'); reload(); }
         catch (error) { setMessage(error.message); }
         finally { setBusy(false); }
     }

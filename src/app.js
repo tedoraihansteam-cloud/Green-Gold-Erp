@@ -9,6 +9,9 @@ const app = express();
 
 app.use(helmet());
 app.use(cors());
+// Large reviewed workbooks contain thousands of normalized rows. Apply the
+// higher limit only to bulk-import JSON; every other API keeps the tighter cap.
+app.use('/api/bulk-imports', express.json({ limit: '12mb' }));
 app.use(express.json({ limit: '2mb' }));
 
 // Generated QR/barcode images and uploaded files are served as static
