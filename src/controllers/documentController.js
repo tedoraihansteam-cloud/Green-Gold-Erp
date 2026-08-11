@@ -193,6 +193,46 @@ async function entityPdf(req, res) {
     const pages=doc.bufferedPageRange();for(let i=0;i<pages.count;i++){doc.switchToPage(i);doc.strokeColor('#e2e8e3').moveTo(42,772).lineTo(553,772).stroke();doc.font('Helvetica').fontSize(6).fillColor('#87958b').text(`${branding.name||'Green Gold ERP'} | ${title} | ${row.business_id}`,42,780,{width:390,lineBreak:false}).text(`Page ${i+1} of ${pages.count}`,480,780,{width:70,align:'right',lineBreak:false});}doc.end();
 }
 
+async function identityCardPdf(req, res) {
+    const entityType = String(req.params.entityType || '').toUpperCase();
+    if (!['EMPLOYEE','CUSTOMER','VENDOR','GATE_PASS'].includes(entityType)) return res.status(400).json({ error: 'Unsupported card type' });
+    requireEntityAccess(req, entityType);
+    const { row } = await loadEntity(entityType, req.params.businessId, req.user.company_id);
+    const branding = await loadBranding(req.user.company_id);
+    const requested = String(req.query.orientation || '').toLowerCase();
+    const orientation = ['vertical','horizontal'].includes(requested) ? requested : (entityType === 'EMPLOYEE' || entityType === 'GATE_PASS' ? 'vertical' : 'horizontal');
+    const size = orientation === 'vertical' ? [153.1, 243.8] : [243.8, 153.1];
+    const name = row.full_name || row.name || row.contact_name || row.business_id;
+    const subtitle = entityType === 'EMPLOYEE' ? (row.designation || 'Employee') : entityType === 'GATE_PASS' ? 'VISITOR / GATE PASS' : entityType;
+    const photoFile = row.profile_photo_path || row.visitor_photo_path;
+    const photoPath = photoFile ? path.join(__dirname, '..', '..', 'storage', 'profile-photos', path.basename(photoFile)) : null;
+    const codes = await renderForEntity(entityType, row.business_id);
+    res.setHeader('Content-Type','application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${entityType}_${row.business_id}_${orientation}_card.pdf"`);
+    const doc = new PDFDocument({ size, margin: 0, info: { Title: `${name} identity card` } });
+    doc.pipe(res);
+    const w=size[0], h=size[1];
+    doc.rect(0,0,w,h).fill('#f7faf7');doc.rect(0,0,w,orientation==='vertical'?42:34).fill('#0c4d36');
+    doc.font('Helvetica-Bold').fontSize(orientation==='vertical'?10:11).fillColor('#fff').text(branding.name||'Green Gold ERP',8,10,{width:w-16,align:'center'});
+    if (orientation==='vertical') {
+        if(photoPath&&fs.existsSync(photoPath)) doc.image(photoPath,49,51,{fit:[55,65],align:'center',valign:'center'}); else {doc.roundedRect(49,51,55,65,4).fill('#dce8df');doc.fontSize(20).fillColor('#5f7768').text(name.slice(0,1).toUpperCase(),49,72,{width:55,align:'center'});}
+        doc.font('Helvetica-Bold').fontSize(11).fillColor('#17241d').text(name,10,123,{width:w-20,align:'center'});
+        doc.font('Helvetica').fontSize(7).fillColor('#185c37').text(subtitle,10,141,{width:w-20,align:'center'});
+        doc.fontSize(6.5).fillColor('#36463d').text(row.business_id,10,155,{width:w-20,align:'center'});
+        if(row.phone||row.contact_phone)doc.text(row.phone||row.contact_phone,10,168,{width:w-20,align:'center'});
+        if(entityType==='GATE_PASS')doc.fontSize(5.7).text([row.affiliated_organization_name,row.visit_location&&`Visit: ${row.visit_location}`,row.host_name&&`Host: ${row.host_name}`].filter(Boolean).join('\n'),10,180,{width:88,align:'left'});
+        doc.image(codes.qrPng,w-49,h-57,{width:39});
+    } else {
+        if(photoPath&&fs.existsSync(photoPath)) doc.image(photoPath,12,44,{fit:[60,72]}); else doc.roundedRect(12,44,60,72,4).fill('#dce8df');
+        doc.font('Helvetica-Bold').fontSize(13).fillColor('#17241d').text(name,84,48,{width:w-94});
+        doc.font('Helvetica').fontSize(7).fillColor('#185c37').text(subtitle,84,68,{width:w-94});
+        doc.fontSize(7).fillColor('#36463d').text(`${row.business_id}\n${row.phone||row.contact_phone||''}\n${row.email||row.affiliated_organization_name||''}`,84,82,{width:w-142,lineGap:2});
+        doc.image(codes.qrPng,w-54,h-61,{width:43});
+    }
+    doc.rect(0,h-12,w,12).fill('#d6a62e');doc.font('Helvetica').fontSize(4.7).fillColor('#173426').text('Scan QR to verify this record. Property of the issuing organization.',5,h-8,{width:w-10,align:'center'});
+    doc.end();
+}
+
 async function batchIdentifiers(req, res) {
     const items = String(req.query.items || '').split(',').filter(Boolean).slice(0, 500);
     if (!items.length) return res.status(400).json({ error: 'items query is required (TYPE:BUSINESS_ID,...)' });
@@ -416,4 +456,4 @@ async function dailyFinancialReportExportV2(req,res){
     const signRow=stored[0]||{created_by:req.user.id};await addResponsibilityFooter(doc,req.user.company_id,'DAILY_FINANCIAL_REPORT',signRow.business_id||date,signRow);doc.end();
 }
 
-module.exports = { entityPdf, batchIdentifiers, balanceSheetExport, machineLogsExport, accountStatementExport, labelSheet, stockBalanceExport, customerMonthlyStatementExport, dailyFinancialReportExport:dailyFinancialReportExportV2, ENTITY_SOURCES, financialInvoiceLines, financialInvoicePdfV2 };
+module.exports = { entityPdf, identityCardPdf, batchIdentifiers, balanceSheetExport, machineLogsExport, accountStatementExport, labelSheet, stockBalanceExport, customerMonthlyStatementExport, dailyFinancialReportExport:dailyFinancialReportExportV2, ENTITY_SOURCES, financialInvoiceLines, financialInvoicePdfV2 };

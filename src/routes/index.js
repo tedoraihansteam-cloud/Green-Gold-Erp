@@ -32,6 +32,7 @@ router.use('/attachments', require('./attachmentRoutes'));
 router.use('/verify', require('./verifyRoutes'));
 router.use('/identifiers', require('./identifierRoutes'));
 router.use('/documents', require('./documentRoutes'));
+router.use('/identity-cards', require('./identityCardRoutes'));
 router.use('/scan', require('./scanRoutes'));
 router.use('/receivables', require('./receivableRoutes'));
 router.use('/customer-portal', require('./customerPortalRoutes'));

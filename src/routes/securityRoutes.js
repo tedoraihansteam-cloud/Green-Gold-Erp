@@ -8,6 +8,7 @@ const router = express.Router();
 router.use(requireAuth);
 
 router.get('/gate-passes', requirePermission('SECURITY_VIEW'), asyncHandler(gatePassController.listGatePasses));
+router.get('/gate-passes-context', requirePermission('SECURITY_VIEW'), asyncHandler(gatePassController.gatePassContext));
 router.get('/gate-passes/:businessId', requirePermission('SECURITY_VIEW'), asyncHandler(gatePassController.getGatePass));
 router.post('/gate-passes/from-invoice/:invoiceBusinessId', requirePermission('SECURITY_CREATE'), asyncHandler(gatePassController.createFromInvoice));
 router.post('/gate-passes', requirePermission('SECURITY_CREATE'), asyncHandler(gatePassController.createManual));

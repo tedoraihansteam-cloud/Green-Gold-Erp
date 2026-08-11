@@ -11,6 +11,7 @@ import DashboardPage from './pages/DashboardPage';
 import CustomersPage from './pages/customers/CustomersPage';
 import VendorsPage from './pages/vendors/VendorsPage';
 import EmployeesPage from './pages/employees/EmployeesPage';
+import EmployeeDetailPage from './pages/employees/EmployeeDetailPage';
 import ProductsPage from './pages/inventory/ProductsPage';
 import WarehousesPage from './pages/inventory/WarehousesPage';
 import StockPage from './pages/inventory/StockPage';
@@ -102,6 +103,7 @@ export default function App() {
                         <Route path="procurement/purchase-orders/:businessId" element={<PurchaseOrderDetailPage />} />
 
                         <Route path="employees" element={<EmployeesPage />} />
+                        <Route path="employees/:businessId" element={<EmployeeDetailPage />} />
                         <Route path="hr/payroll" element={<PayrollRunsPage />} />
                         <Route path="hr/salary-templates" element={<SalaryTemplatesPage />} />
                         <Route path="budgets" element={<BudgetsPage />} />

@@ -53,7 +53,7 @@ async function createFromInvoice(req, res) {
  * visitors, contractors, machine movement, employee asset movement.
  */
 async function createManual(req, res) {
-    const { passType, description, vehicleNumber, contactName, contactPhone } = req.body;
+    const { passType, description, vehicleNumber, contactName, contactPhone, affiliatedEntityType, affiliatedEntityBusinessId, affiliatedOrganizationName, hostName, visitLocation, validUntil } = req.body;
 
     if (!passType || !VALID_PASS_TYPES.includes(passType)) {
         return res.status(400).json({ error: `passType must be one of: ${VALID_PASS_TYPES.join(', ')}` });
@@ -64,14 +64,28 @@ async function createManual(req, res) {
     if (!description) {
         return res.status(400).json({ error: 'description is required' });
     }
+    if (passType === 'VISITOR' && (!String(contactName || '').trim() || !String(contactPhone || '').trim())) {
+        return res.status(400).json({ error: 'Visitor name and visitor phone number are required' });
+    }
+    const validAffiliations = ['CUSTOMER','VENDOR','EMPLOYEE','OTHER_ORGANIZATION'];
+    if (affiliatedEntityType && !validAffiliations.includes(affiliatedEntityType)) return res.status(400).json({ error: 'Invalid affiliation type' });
 
     const gatePass = await withTransaction(async (client) => {
         const businessId = await generateNextId('GATE_PASS');
+        let organization = String(affiliatedOrganizationName || '').trim() || null;
+        if (affiliatedEntityType && affiliatedEntityType !== 'OTHER_ORGANIZATION') {
+            if (!affiliatedEntityBusinessId) throw Object.assign(new Error('Select the affiliated customer, vendor, or employee'), { statusCode: 400 });
+            const source = { CUSTOMER:['master_customers','name'], VENDOR:['master_vendors','name'], EMPLOYEE:['master_employees','full_name'] }[affiliatedEntityType];
+            const linked = (await client.query(`SELECT ${source[1]} name FROM ${source[0]} WHERE business_id=$1 AND company_id=$2 AND deleted_at IS NULL`, [affiliatedEntityBusinessId, req.user.company_id])).rows[0];
+            if (!linked) throw Object.assign(new Error('Affiliated record was not found'), { statusCode: 400 });
+            organization = linked.name;
+        }
+        if (affiliatedEntityType === 'OTHER_ORGANIZATION' && !organization) throw Object.assign(new Error('Enter the affiliated organization name'), { statusCode: 400 });
         const { rows } = await client.query(
-            `INSERT INTO gate_passes (business_id, company_id, pass_type, source_reference_type, description, vehicle_number, contact_name, contact_phone, issued_by)
-             VALUES ($1, $2, $3, 'MANUAL', $4, $5, $6, $7, $8)
+            `INSERT INTO gate_passes (business_id, company_id, pass_type, source_reference_type, description, vehicle_number, contact_name, contact_phone, affiliated_entity_type, affiliated_entity_business_id, affiliated_organization_name, host_name, visit_location, valid_until, issued_by)
+             VALUES ($1, $2, $3, 'MANUAL', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
              RETURNING *`,
-            [businessId, req.user.company_id, passType, description, vehicleNumber || null, contactName || null, contactPhone || null, req.user.id]
+            [businessId, req.user.company_id, passType, description, vehicleNumber || null, contactName || null, contactPhone || null, affiliatedEntityType || null, affiliatedEntityBusinessId || null, organization, hostName || null, visitLocation || null, validUntil || null, req.user.id]
         );
         return rows[0];
     });
@@ -80,6 +94,16 @@ async function createManual(req, res) {
     await logAction({ actorUserId: req.user.id, action: 'GATE_PASS_ISSUED', entityType: 'GATE_PASS', entityId: gatePass.business_id, after: gatePass });
 
     res.status(201).json({ gatePass });
+}
+
+async function gatePassContext(req, res) {
+    const company = req.user.company_id;
+    const [customers, vendors, employees] = await Promise.all([
+        query(`SELECT business_id,name FROM master_customers WHERE company_id=$1 AND deleted_at IS NULL AND status='active' ORDER BY name`, [company]),
+        query(`SELECT business_id,name FROM master_vendors WHERE company_id=$1 AND deleted_at IS NULL AND status='active' ORDER BY name`, [company]),
+        query(`SELECT business_id,full_name name FROM master_employees WHERE company_id=$1 AND deleted_at IS NULL AND status='active' ORDER BY full_name`, [company])
+    ]);
+    res.json({ customers: customers.rows, vendors: vendors.rows, employees: employees.rows });
 }
 
 async function listGatePasses(req, res) {
@@ -138,4 +162,4 @@ async function cancelGatePass(req, res) {
     res.json({ message: 'Gate pass cancelled', gatePass: rows[0] });
 }
 
-module.exports = { createFromInvoice, createManual, listGatePasses, getGatePass, confirmExit, cancelGatePass };
+module.exports = { createFromInvoice, createManual, listGatePasses, getGatePass, gatePassContext, confirmExit, cancelGatePass };
