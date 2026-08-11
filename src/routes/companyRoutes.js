@@ -18,5 +18,6 @@ router.post('/departments', requirePermission('SETTINGS_CREATE'), asyncHandler(c
 router.get('/departments/:businessId',asyncHandler(companyController.departmentDetail));
 router.put('/departments/:businessId',requirePermission('SETTINGS_CREATE'),asyncHandler(companyController.updateDepartment));
 router.post('/departments/:businessId/assign-staff',requirePermission('HR_EDIT'),asyncHandler(companyController.assignStaff));
+router.post('/departments/:businessId/unassign-staff',requirePermission('HR_EDIT'),asyncHandler(companyController.unassignStaff));
 
 module.exports = router;
