@@ -13,6 +13,9 @@ function deleteTemporaryUpload(filePath) {
     try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); }
     catch (error) { console.error(`Temporary import cleanup failed for ${filePath}:`, error.message); }
 }
+const normalizedAlias=(value)=>String(value||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+function applyEntityMatches(extraction,context,aliases=[]){if(extraction?.mode!=='multi_domain')return extraction;const masters=[...(context.customers||[]).map(x=>({...x,entityType:'CUSTOMER',matchName:x.name})),...(context.vendors||[]).map(x=>({...x,entityType:'VENDOR',matchName:x.name})),...(context.employees||[]).map(x=>({...x,entityType:'EMPLOYEE',matchName:x.full_name})),...(context.accounts||[]).map(x=>({...x,entityType:'ACCOUNT',matchName:x.name}))],roles={CUSTOMER:'customer',VENDOR:'vendor',EMPLOYEE:'staff',ACCOUNT:'account'};return{...extraction,entityCandidates:(extraction.entityCandidates||[]).map(entity=>{if(entity.matchSuppressed||entity.matchBusinessId)return entity;const key=normalizedAlias(entity.name),alias=aliases.find(x=>x.normalized_alias===key),exact=masters.find(x=>normalizedAlias(x.matchName)===key);const match=alias?{businessId:alias.target_business_id,entityType:alias.target_entity_type,status:'saved_alias'}:exact?{businessId:exact.business_id,entityType:exact.entityType,status:'exact_name'}:null;return match?{...entity,role:entity.role||roles[match.entityType],matchBusinessId:match.businessId,matchEntityType:match.entityType,matchStatus:match.status}:entity;})};}
+async function persistAliasDecisions(extraction,user){const tables={CUSTOMER:'master_customers',VENDOR:'master_vendors',EMPLOYEE:'master_employees',ACCOUNT:'accounts'};for(const entity of extraction?.entityCandidates||[]){const key=normalizedAlias(entity.name);if(!key)continue;if(entity.matchSuppressed){await query(`DELETE FROM bulk_import_entity_aliases WHERE company_id=$1 AND normalized_alias=$2`,[user.company_id,key]);continue;}if(!entity.matchConfirmed||!entity.matchBusinessId||!tables[entity.matchEntityType])continue;const target=(await query(`SELECT business_id FROM ${tables[entity.matchEntityType]} WHERE company_id=$1 AND business_id=$2 AND deleted_at IS NULL`,[user.company_id,entity.matchBusinessId])).rows[0];if(!target)throw Object.assign(new Error(`The selected ${entity.matchEntityType.toLowerCase()} for ${entity.name} no longer exists`),{statusCode:422});await query(`INSERT INTO bulk_import_entity_aliases(company_id,normalized_alias,display_alias,target_entity_type,target_business_id,candidate_class,created_by) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(company_id,normalized_alias) DO UPDATE SET display_alias=EXCLUDED.display_alias,target_entity_type=EXCLUDED.target_entity_type,target_business_id=EXCLUDED.target_business_id,candidate_class=EXCLUDED.candidate_class,updated_at=now()`,[user.company_id,key,entity.name,entity.matchEntityType,entity.matchBusinessId,entity.candidateClass||null,user.id]);}}
 async function registerGeneratedCodes(items = []) {
     const seen = new Set();
     for (const item of items) {
@@ -49,7 +52,7 @@ function validateFlatRows(job, map) {
 }
 async function reviewContext(job, companyId) {
     if (job.extraction_result?.mode === 'multi_domain') {
-        const [warehouses, locations, accounts, customers, vendors, employees, departments, sites, duplicateUploads] = await Promise.all([
+        const [warehouses, locations, accounts, customers, vendors, employees, departments, sites, duplicateUploads, aliases] = await Promise.all([
             query(`SELECT business_id,name FROM warehouses WHERE company_id=$1 AND deleted_at IS NULL ORDER BY name`, [companyId]),
             query(`SELECT sl.business_id,sl.name,sl.location_type,w.business_id warehouse_business_id,w.name warehouse_name FROM storage_locations sl JOIN warehouses w ON w.id=sl.warehouse_id WHERE sl.company_id=$1 AND sl.deleted_at IS NULL ORDER BY w.name,sl.name`, [companyId]),
             query(`SELECT business_id,name,account_type,current_balance FROM accounts WHERE company_id=$1 AND deleted_at IS NULL AND status='active' ORDER BY account_type,name`, [companyId]),
@@ -58,14 +61,16 @@ async function reviewContext(job, companyId) {
             query(`SELECT business_id,full_name,designation FROM master_employees WHERE company_id=$1 AND deleted_at IS NULL ORDER BY full_name`, [companyId]),
             query(`SELECT d.business_id,d.name,b.name branch_name FROM departments d JOIN branches b ON b.id=d.branch_id WHERE b.company_id=$1 AND d.status='active' ORDER BY b.name,d.name`, [companyId]),
             query(`SELECT id,name,site_type,address FROM company_sites WHERE company_id=$1 ORDER BY name`, [companyId]),
-            job.source_summary?.sourceHash ? query(`SELECT business_id,original_name,status,created_at FROM bulk_import_jobs WHERE company_id=$1 AND id<>$2 AND source_summary->>'sourceHash'=$3 ORDER BY created_at DESC LIMIT 10`, [companyId, job.id, job.source_summary.sourceHash]) : Promise.resolve({ rows: [] })
+            job.source_summary?.sourceHash ? query(`SELECT business_id,original_name,status,created_at FROM bulk_import_jobs WHERE company_id=$1 AND id<>$2 AND source_summary->>'sourceHash'=$3 ORDER BY created_at DESC LIMIT 10`, [companyId, job.id, job.source_summary.sourceHash]) : Promise.resolve({ rows: [] }),
+            query(`SELECT normalized_alias,target_entity_type,target_business_id,candidate_class FROM bulk_import_entity_aliases WHERE company_id=$1`,[companyId])
         ]);
         const [workflow, events] = await Promise.all([
             query(`SELECT enabled,display_name,approval_steps FROM workflow_definitions WHERE company_id=$1 AND workflow_key='universal_data_import'`, [companyId]),
             query(`SELECT e.step_index,e.step_name,e.action,e.notes,e.created_at,u.username,u.display_name FROM bulk_import_approval_events e JOIN users u ON u.id=e.actor_user_id WHERE e.job_id=$1 ORDER BY e.created_at`, [job.id])
         ]);
         const approvalSteps = (job.approval_snapshot?.length ? job.approval_snapshot : workflow.rows[0]?.approval_steps) || [];
-        return { ...job, review_context: {
+        const matchContext={accounts:accounts.rows,customers:customers.rows,vendors:vendors.rows,employees:employees.rows};
+        return { ...job, extraction_result:applyEntityMatches(job.extraction_result,matchContext,aliases.rows), review_context: {
             warehouses: warehouses.rows, locations: locations.rows, accounts: accounts.rows,
             customers: customers.rows, vendors: vendors.rows, employees: employees.rows,
             departments: departments.rows, sites: sites.rows, duplicateUploads: duplicateUploads.rows,
@@ -159,6 +164,7 @@ async function updateReview(req, res) {
     const editableStatuses = current.final_approved_at ? ['partially_posted', 'posting_failed'] : ['review'];
     const { rows } = await query(`UPDATE bulk_import_jobs SET field_mapping=COALESCE($1,field_mapping),submission_options=COALESCE($2,submission_options),extraction_result=COALESCE($3::jsonb,extraction_result),source_summary=COALESCE($4::jsonb,source_summary),routing_plan=COALESCE($5::jsonb,routing_plan),validation_errors=COALESCE($6::jsonb,validation_errors) WHERE id=$7 AND status=ANY($8::text[]) RETURNING *`, [req.body.fieldMapping || null, req.body.submissionOptions || null, revised ? JSON.stringify(revised.extractionResult) : null, revised ? JSON.stringify(revised.sourceSummary) : null, revised ? JSON.stringify(revised.routingPlan) : null, revised ? JSON.stringify(revised.validationErrors) : null, current.id, editableStatuses]);
     if (!rows.length) return res.status(404).json({ error: 'Review job not found' });
+    if(revised?.extractionResult?.mode==='multi_domain')await persistAliasDecisions(revised.extractionResult,req.user);
     if (revised?.extractionResult?.mode === 'multi_domain') await logAction({ actorUserId: req.user.id, action: 'BULK_IMPORT_MANUAL_REVIEW_SAVED', entityType: 'BULK_IMPORT', entityId: req.params.businessId, after: { manualSections: revised.extractionResult.sections.filter((section) => section.manualMode).map((section) => ({ id: section.id, mismatches: section.manualReview?.mismatches?.length || 0, manualRows: section.manualReview?.manualRows || 0, overrideConfirmed: !!section.manualOverride?.confirmed, overrideReason: section.manualOverride?.reason || null })), manualEntities: revised.extractionResult.entityCandidates.filter((entity) => entity.manualEntry).map((entity) => ({ name: entity.name, role: entity.role, matchBusinessId: entity.matchBusinessId || null })) } });
     res.json({ job: await reviewContext(rows[0], req.user.company_id) });
 }
@@ -200,7 +206,8 @@ async function resolveSelected(client, table, businessId, companyId, extra = '')
     return rows.length === 1 ? rows[0] : null;
 }
 async function ensureEmployee(client, user, record, options = {}) {
-    const matched = (await client.query(`SELECT * FROM master_employees WHERE company_id=$1 AND deleted_at IS NULL AND lower(full_name)=lower($2) ORDER BY CASE WHEN lower(COALESCE(designation,''))=lower($3) THEN 0 ELSE 1 END LIMIT 1`, [user.company_id, record.employeeName, record.designation || ''])).rows[0];
+    const selected=options.employeeBusinessId?(await client.query(`SELECT * FROM master_employees WHERE business_id=$1 AND company_id=$2 AND deleted_at IS NULL`,[options.employeeBusinessId,user.company_id])).rows[0]:null;
+    const matched = selected||(await client.query(`SELECT * FROM master_employees WHERE company_id=$1 AND deleted_at IS NULL AND lower(full_name)=lower($2) ORDER BY CASE WHEN lower(COALESCE(designation,''))=lower($3) THEN 0 ELSE 1 END LIMIT 1`, [user.company_id, record.employeeName, record.designation || ''])).rows[0];
     if (matched) return { row: matched, created: false };
     let departmentId = null;
     if (options.departmentBusinessId) departmentId = (await client.query(`SELECT d.id FROM departments d JOIN branches b ON b.id=d.branch_id WHERE d.business_id=$1 AND b.company_id=$2`, [options.departmentBusinessId, user.company_id])).rows[0]?.id || null;
@@ -208,6 +215,7 @@ async function ensureEmployee(client, user, record, options = {}) {
     const row = (await client.query(`INSERT INTO master_employees(business_id,company_id,department_id,full_name,designation,status) VALUES($1,$2,$3,$4,$5,'active') RETURNING *`, [businessId, user.company_id, departmentId, record.employeeName, record.designation || null])).rows[0];
     return { row, created: true };
 }
+function candidateMatch(job,name,type){const key=normalizedAlias(name);return(job.extraction_result?.entityCandidates||[]).find(x=>normalizedAlias(x.name)===key&&x.selected!==false&&x.matchBusinessId&&(!type||x.matchEntityType===type))?.matchBusinessId||null;}
 async function ensureCustomer(client, user, name, selectedBusinessId) {
     let row = selectedBusinessId ? (await client.query(`SELECT * FROM master_customers WHERE business_id=$1 AND company_id=$2 AND deleted_at IS NULL`, [selectedBusinessId, user.company_id])).rows[0] : null;
     if (!row && name) row = (await client.query(`SELECT * FROM master_customers WHERE company_id=$1 AND deleted_at IS NULL AND lower(name)=lower($2) LIMIT 1`, [user.company_id, name])).rows[0];
@@ -246,7 +254,7 @@ async function postPayrollSection(client, job, section, user) {
     if (!historyOnly && !run) { const businessId = await generateNextId('PAYROLL_RUN'); run = (await client.query(`INSERT INTO payroll_runs(business_id,company_id,period_year,period_month,status,created_by) VALUES($1,$2,$3,$4,'draft',$5) RETURNING *`, [businessId, user.company_id, period.year, period.month, user.id])).rows[0]; }
     let createdEmployees = 0, postedItems = 0;
     for (const record of section.records || []) {
-        const employee = await ensureEmployee(client, user, record, options); if (employee.created) createdEmployees++;
+        const employee = await ensureEmployee(client, user, record, {...options,employeeBusinessId:candidateMatch(job,record.employeeName,'EMPLOYEE')}); if (employee.created) createdEmployees++;
         const basic = numeric(record.basicSalary), house = numeric(record.houseRent), medical = numeric(record.medicalAllowance), transport = numeric(record.conveyanceAllowance);
         const special = numeric(record.firstIncrement) + numeric(record.secondIncrement) + numeric(record.da) + numeric(record.utilityAllowance) + numeric(record.otherAllowance);
         const gross = numeric(record.grossSalary) || basic + house + medical + transport + special;
@@ -282,7 +290,8 @@ async function postSecuritySection(client, job, section, user) {
 async function postAccountSection(client, job, section, user) {
     const options = section.postingOptions || {}, target = questionAnswer(section, 'postingTarget') || 'draft_for_accounts_review', accountMatch = questionAnswer(section, 'accountMatch') || 'ask_user_to_select_account';
     if (target === 'reference_only' || target === 'skip_section' || accountMatch === 'reference_only') return { targetType: 'BULK_IMPORT_REFERENCE', targetId: section.id, records: section.records?.length || 0, generated: [], referenceOnly: true };
-    const account = await resolveSelected(client, 'accounts', options.accountBusinessId, user.company_id, `AND deleted_at IS NULL AND status='active'`);
+    const sourceMatches=(job.extraction_result?.entityCandidates||[]).filter(x=>x.selected!==false&&x.matchEntityType==='ACCOUNT'&&x.matchBusinessId&&(x.sources||[]).includes(section.sheetName));
+    const account = await resolveSelected(client, 'accounts', options.accountBusinessId||(sourceMatches.length===1?sourceMatches[0].matchBusinessId:null), user.company_id, `AND deleted_at IS NULL AND status='active'`);
     if (!account) throw Object.assign(new Error(`${section.title}: select the ERP cash/bank account before posting`), { statusCode: 422 });
     let posted = 0;
     for (const record of section.records || []) {
@@ -329,7 +338,7 @@ async function postBalanceSummarySection(client, job, section, user) {
     if (target === 'reconciliation_only' || target === 'skip_section') return { targetType: 'BULK_IMPORT_REFERENCE', targetId: section.id, records: section.records?.length || 0, generated: [], referenceOnly: true };
     let posted = 0, createdCustomers = 0; const generated = [];
     for (const record of section.records || []) {
-        const customer = await ensureCustomer(client, user, record.partyName, null); if (customer.created) createdCustomers++;
+        const customer = await ensureCustomer(client, user, record.partyName, candidateMatch(job,record.partyName,'CUSTOMER')); if (customer.created) createdCustomers++;
         const due = Math.max(0, numeric(record.total)); if (due <= 0) continue;
         const sourceId = `${job.business_id}:${section.id}:${record.sourceRow}`;
         if ((await client.query(`SELECT 1 FROM customer_receivables WHERE source_type='BULK_IMPORT_OPENING' AND source_id=$1`, [sourceId])).rows.length) continue;
@@ -367,7 +376,7 @@ async function postManualEntities(client, job, user) {
     for (const entity of (job.extraction_result?.entityCandidates || []).filter((item) => item.selected && item.manualEntry && !['ignore', 'other', 'external_person'].includes(item.role))) {
         if (entity.role === 'customer' || entity.role === 'both') { const result = await ensureCustomer(client, user, entity.name, entity.matchBusinessId); if (result.created) generated.push({ type: 'CUSTOMER', code: result.row.business_id }); }
         if (entity.role === 'vendor' || entity.role === 'both') { const result = await ensureVendor(client, user, entity.name, entity.matchBusinessId); if (result.created) generated.push({ type: 'VENDOR', code: result.row.business_id }); }
-        if (entity.role === 'staff') { const result = await ensureEmployee(client, user, { employeeName: entity.name, designation: entity.designation || '' }, { departmentBusinessId: entity.departmentBusinessId }); if (result.created) generated.push({ type: 'EMPLOYEE', code: result.row.business_id }); }
+        if (entity.role === 'staff') { const result = await ensureEmployee(client, user, { employeeName: entity.name, designation: entity.designation || '' }, { departmentBusinessId: entity.departmentBusinessId,employeeBusinessId:entity.matchBusinessId }); if (result.created) generated.push({ type: 'EMPLOYEE', code: result.row.business_id }); }
     }
     return generated;
 }
