@@ -113,12 +113,26 @@ async function get(req, res) {
     res.json({ job: await reviewContext(rows[0], req.user.company_id) });
 }
 async function updateReview(req, res) {
-    const current = (await query(`SELECT * FROM bulk_import_jobs WHERE business_id=$1 AND company_id=$2 AND status='review'`, [req.params.businessId, req.user.company_id])).rows[0];
+    const current = (await query(`SELECT * FROM bulk_import_jobs WHERE business_id=$1 AND company_id=$2 AND status IN('review','partially_posted','posting_failed')`, [req.params.businessId, req.user.company_id])).rows[0];
     if (!current) return res.status(404).json({ error: 'Review job not found' });
     let revised = null;
     if (req.body.extractionResult && current.extraction_result?.mode === 'structured') revised = recalculateStructuredReview(req.body.extractionResult);
-    if (req.body.extractionResult && current.extraction_result?.mode === 'multi_domain') revised = recalculateMultiDomainReview(req.body.extractionResult);
-    const { rows } = await query(`UPDATE bulk_import_jobs SET field_mapping=COALESCE($1,field_mapping),submission_options=COALESCE($2,submission_options),extraction_result=COALESCE($3::jsonb,extraction_result),source_summary=COALESCE($4::jsonb,source_summary),routing_plan=COALESCE($5::jsonb,routing_plan),validation_errors=COALESCE($6::jsonb,validation_errors) WHERE id=$7 AND status='review' RETURNING *`, [req.body.fieldMapping || null, req.body.submissionOptions || null, revised ? JSON.stringify(revised.extractionResult) : null, revised ? JSON.stringify(revised.sourceSummary) : null, revised ? JSON.stringify(revised.routingPlan) : null, revised ? JSON.stringify(revised.validationErrors) : null, current.id]);
+    if (req.body.extractionResult && current.extraction_result?.mode === 'multi_domain') {
+        let requested = req.body.extractionResult;
+        if (current.final_approved_at) {
+            const requestedSections = new Map((requested.sections || []).map((section) => [section.id, section]));
+            requested = {
+                ...current.extraction_result,
+                sections: (current.extraction_result.sections || []).map((section) => ({
+                    ...section,
+                    postingOptions: requestedSections.get(section.id)?.postingOptions || section.postingOptions || {}
+                }))
+            };
+        }
+        revised = recalculateMultiDomainReview(requested);
+    }
+    const editableStatuses = current.final_approved_at ? ['partially_posted', 'posting_failed'] : ['review'];
+    const { rows } = await query(`UPDATE bulk_import_jobs SET field_mapping=COALESCE($1,field_mapping),submission_options=COALESCE($2,submission_options),extraction_result=COALESCE($3::jsonb,extraction_result),source_summary=COALESCE($4::jsonb,source_summary),routing_plan=COALESCE($5::jsonb,routing_plan),validation_errors=COALESCE($6::jsonb,validation_errors) WHERE id=$7 AND status=ANY($8::text[]) RETURNING *`, [req.body.fieldMapping || null, req.body.submissionOptions || null, revised ? JSON.stringify(revised.extractionResult) : null, revised ? JSON.stringify(revised.sourceSummary) : null, revised ? JSON.stringify(revised.routingPlan) : null, revised ? JSON.stringify(revised.validationErrors) : null, current.id, editableStatuses]);
     if (!rows.length) return res.status(404).json({ error: 'Review job not found' });
     res.json({ job: await reviewContext(rows[0], req.user.company_id) });
 }
@@ -152,16 +166,187 @@ function sectionDepartment(type) {
     if (type.includes('customer')) return 'CUSTOMER MANAGEMENT';
     return 'MANAGEMENT';
 }
+const numeric = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+const questionAnswer = (section, key) => (section.questions || []).find((item) => item.key === key)?.value || '';
+async function resolveSelected(client, table, businessId, companyId, extra = '') {
+    if (businessId) return (await client.query(`SELECT * FROM ${table} WHERE business_id=$1 AND company_id=$2 ${extra} LIMIT 1`, [businessId, companyId])).rows[0] || null;
+    const rows = (await client.query(`SELECT * FROM ${table} WHERE company_id=$1 ${extra} ORDER BY created_at LIMIT 2`, [companyId])).rows;
+    return rows.length === 1 ? rows[0] : null;
+}
+async function ensureEmployee(client, user, record, options = {}) {
+    const matched = (await client.query(`SELECT * FROM master_employees WHERE company_id=$1 AND deleted_at IS NULL AND lower(full_name)=lower($2) ORDER BY CASE WHEN lower(COALESCE(designation,''))=lower($3) THEN 0 ELSE 1 END LIMIT 1`, [user.company_id, record.employeeName, record.designation || ''])).rows[0];
+    if (matched) return { row: matched, created: false };
+    let departmentId = null;
+    if (options.departmentBusinessId) departmentId = (await client.query(`SELECT d.id FROM departments d JOIN branches b ON b.id=d.branch_id WHERE d.business_id=$1 AND b.company_id=$2`, [options.departmentBusinessId, user.company_id])).rows[0]?.id || null;
+    const businessId = await generateNextId('EMPLOYEE');
+    const row = (await client.query(`INSERT INTO master_employees(business_id,company_id,department_id,full_name,designation,status) VALUES($1,$2,$3,$4,$5,'active') RETURNING *`, [businessId, user.company_id, departmentId, record.employeeName, record.designation || null])).rows[0];
+    return { row, created: true };
+}
+async function ensureCustomer(client, user, name, selectedBusinessId) {
+    let row = selectedBusinessId ? (await client.query(`SELECT * FROM master_customers WHERE business_id=$1 AND company_id=$2 AND deleted_at IS NULL`, [selectedBusinessId, user.company_id])).rows[0] : null;
+    if (!row && name) row = (await client.query(`SELECT * FROM master_customers WHERE company_id=$1 AND deleted_at IS NULL AND lower(name)=lower($2) LIMIT 1`, [user.company_id, name])).rows[0];
+    if (row) return { row, created: false };
+    const businessId = await generateNextId('CUSTOMER');
+    row = (await client.query(`INSERT INTO master_customers(business_id,company_id,name,customer_type) VALUES($1,$2,$3,'imported_business_party') RETURNING *`, [businessId, user.company_id, name || 'Imported customer'])).rows[0];
+    return { row, created: true };
+}
+async function ensureVendor(client, user, name, selectedBusinessId) {
+    let row = selectedBusinessId ? (await client.query(`SELECT * FROM master_vendors WHERE business_id=$1 AND company_id=$2 AND deleted_at IS NULL`, [selectedBusinessId, user.company_id])).rows[0] : null;
+    if (!row && name) row = (await client.query(`SELECT * FROM master_vendors WHERE company_id=$1 AND deleted_at IS NULL AND lower(name)=lower($2) LIMIT 1`, [user.company_id, name])).rows[0];
+    if (row) return { row, created: false };
+    const businessId = await generateNextId('VENDOR');
+    row = (await client.query(`INSERT INTO master_vendors(business_id,company_id,name,vendor_type) VALUES($1,$2,$3,'imported_service_provider') RETURNING *`, [businessId, user.company_id, name || 'Imported vendor'])).rows[0];
+    return { row, created: true };
+}
+async function ensureProduct(client, user, name, unit = 'pcs', category = 'Imported inventory') {
+    let row = (await client.query(`SELECT * FROM products WHERE company_id=$1 AND deleted_at IS NULL AND lower(name)=lower($2) LIMIT 1`, [user.company_id, name])).rows[0];
+    if (row) return { row, created: false };
+    const businessId = await generateNextId('PRODUCT');
+    row = (await client.query(`INSERT INTO products(business_id,company_id,name,category,unit) VALUES($1,$2,$3,$4,$5) RETURNING *`, [businessId, user.company_id, name, category, unit || 'pcs'])).rows[0];
+    return { row, created: true };
+}
+function payrollPeriod(section) {
+    const match = String(section.periodKey || '').match(/^(20\d{2})-(\d{2})$/);
+    if (!match) throw Object.assign(new Error(`${section.title}: payroll year and month could not be detected`), { statusCode: 422 });
+    return { year: Number(match[1]), month: Number(match[2]), effectiveDate: `${match[1]}-${match[2]}-01` };
+}
+async function postPayrollSection(client, job, section, user) {
+    const period = payrollPeriod(section), options = section.postingOptions || {}, target = questionAnswer(section, 'postingTarget') || 'draft_payroll_run';
+    if (target === 'reference_only') return { targetType: 'BULK_IMPORT_REFERENCE', targetId: section.id, records: section.records?.length || 0, generated: [], referenceOnly: true };
+    if (target === 'attendance_only') throw Object.assign(new Error(`${section.title}: attendance posting is unavailable because the sheet has no clock-in or clock-out data`), { statusCode: 422 });
+    const historyOnly = target === 'employee_salary_history';
+    let run = historyOnly ? null : (await client.query(`SELECT * FROM payroll_runs WHERE company_id=$1 AND period_year=$2 AND period_month=$3 FOR UPDATE`, [user.company_id, period.year, period.month])).rows[0];
+    if (run && !['draft', 'submitted_to_accounts'].includes(run.status)) throw Object.assign(new Error(`${section.title}: payroll ${section.periodKey} is already ${run.status}`), { statusCode: 409 });
+    if (!historyOnly && !run) { const businessId = await generateNextId('PAYROLL_RUN'); run = (await client.query(`INSERT INTO payroll_runs(business_id,company_id,period_year,period_month,status,created_by) VALUES($1,$2,$3,$4,'draft',$5) RETURNING *`, [businessId, user.company_id, period.year, period.month, user.id])).rows[0]; }
+    let createdEmployees = 0, postedItems = 0;
+    for (const record of section.records || []) {
+        const employee = await ensureEmployee(client, user, record, options); if (employee.created) createdEmployees++;
+        const basic = numeric(record.basicSalary), house = numeric(record.houseRent), medical = numeric(record.medicalAllowance), transport = numeric(record.conveyanceAllowance);
+        const special = numeric(record.firstIncrement) + numeric(record.secondIncrement) + numeric(record.da) + numeric(record.utilityAllowance) + numeric(record.otherAllowance);
+        const gross = numeric(record.grossSalary) || basic + house + medical + transport + special;
+        const advance = numeric(record.advance), other = numeric(record.otherDeduction) + numeric(record.absenceDeduction), totalDeduction = numeric(record.totalDeduction) || advance + other;
+        const net = numeric(record.netPayable) || Math.max(0, gross - totalDeduction);
+        if (run) await client.query(`INSERT INTO payroll_items(payroll_run_id,employee_id,basic,house_rent,medical,transport,special_allowance,advance_deduction,other_deduction,gross_pay,total_deductions,net_pay) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(payroll_run_id,employee_id) DO UPDATE SET basic=EXCLUDED.basic,house_rent=EXCLUDED.house_rent,medical=EXCLUDED.medical,transport=EXCLUDED.transport,special_allowance=EXCLUDED.special_allowance,advance_deduction=EXCLUDED.advance_deduction,other_deduction=EXCLUDED.other_deduction,gross_pay=EXCLUDED.gross_pay,total_deductions=EXCLUDED.total_deductions,net_pay=EXCLUDED.net_pay`, [run.id, employee.row.id, basic, house, medical, transport, special, advance, other, gross, totalDeduction, net]);
+        const salaryExists = (await client.query(`SELECT 1 FROM employee_salary_history WHERE employee_id=$1 AND effective_date=$2::date LIMIT 1`, [employee.row.id, period.effectiveDate])).rows.length;
+        if (!salaryExists) await client.query(`INSERT INTO employee_salary_history(company_id,employee_id,basic,house_rent,medical,transport,special_allowance,effective_date,set_by,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [user.company_id, employee.row.id, basic, house, medical, transport, special, period.effectiveDate, user.id, `Imported from ${job.business_id} / ${section.sheetName}`]);
+        postedItems++;
+    }
+    return run ? { targetType: 'PAYROLL_RUN', targetId: run.business_id, records: postedItems, createdEmployees, generated: [run.business_id] } : { targetType: 'EMPLOYEE_SALARY_HISTORY', targetId: section.periodKey, records: postedItems, createdEmployees, generated: [] };
+}
+async function postSecuritySection(client, job, section, user) {
+    const options = section.postingOptions || {}, target = questionAnswer(section, 'postingTarget') || 'vendor_bill', vendorChoice = questionAnswer(section, 'vendorMatch') || 'create_new_vendor';
+    if (target === 'reference_only') return { targetType: 'BULK_IMPORT_REFERENCE', targetId: section.id, records: section.records?.length || 0, generated: [], referenceOnly: true };
+    if (target !== 'vendor_bill') throw Object.assign(new Error(`${section.title}: attendance cannot be created from a payroll-only sheet`), { statusCode: 422 });
+    const vendorName = String(section.sheetName || section.title).replace(/payroll|salary|sheet|\d{4}|[-_/]/gi, ' ').replace(/\s+/g, ' ').trim() || 'Security service provider';
+    if (vendorChoice === 'ask_user_to_select_existing_vendor' && !options.vendorBusinessId) throw Object.assign(new Error(`${section.title}: select the existing security-service vendor`), { statusCode: 422 });
+    const vendor = vendorChoice === 'do_not_create_vendor' && !options.vendorBusinessId ? { row: { id: null, name: vendorName }, created: false } : await ensureVendor(client, user, vendorName, options.vendorBusinessId);
+    const amount = numeric(section.summary?.netPayable) || (section.records || []).reduce((sum, row) => sum + numeric(row.netPayable), 0);
+    if (amount <= 0) throw Object.assign(new Error(`${section.title}: no payable amount was detected`), { statusCode: 422 });
+    const existing = (await client.query(`SELECT business_id FROM bill_submissions WHERE company_id=$1 AND related_type='BULK_IMPORT_SECTION' AND related_id=$2 LIMIT 1`, [user.company_id, section.id])).rows[0];
+    if (existing) return { targetType: 'BILL_SUBMISSION', targetId: existing.business_id, records: section.records?.length || 0, generated: [existing.business_id], matchedExisting: true };
+    const businessId = await generateNextId('BILL_SUBMISSION');
+    await client.query(`INSERT INTO bill_submissions(business_id,company_id,submitter_user_id,vendor_id,bill_number,bill_date,category,payee,amount,description,related_type,related_id,status,submitted_at,claimant_type,expense_breakdown) VALUES($1,$2,$3,$4,$5,CURRENT_DATE,'OUTSOURCED_SECURITY',$6,$7,$8,'BULK_IMPORT_SECTION',$9,'submitted',now(),'vendor',$10::jsonb)`, [businessId, user.company_id, user.id, vendor.row.id, `${job.business_id}-${section.periodKey || section.sheetName}`, vendor.row.name, amount, `Imported outsourced security payroll from ${section.sheetName}`, section.id, JSON.stringify(section.records || [])]);
+    return { targetType: 'BILL_SUBMISSION', targetId: businessId, records: section.records?.length || 0, createdVendor: vendor.created, generated: [businessId] };
+}
+async function postAccountSection(client, job, section, user) {
+    const options = section.postingOptions || {}, target = questionAnswer(section, 'postingTarget') || 'draft_for_accounts_review', accountMatch = questionAnswer(section, 'accountMatch') || 'ask_user_to_select_account';
+    if (target === 'reference_only' || target === 'skip_section' || accountMatch === 'reference_only') return { targetType: 'BULK_IMPORT_REFERENCE', targetId: section.id, records: section.records?.length || 0, generated: [], referenceOnly: true };
+    const account = await resolveSelected(client, 'accounts', options.accountBusinessId, user.company_id, `AND deleted_at IS NULL AND status='active'`);
+    if (!account) throw Object.assign(new Error(`${section.title}: select the ERP cash/bank account before posting`), { statusCode: 422 });
+    let posted = 0;
+    for (const record of section.records || []) {
+        const legs = options.debitMeaning === 'deposit' ? [{ amount: record.debit, type: 'DEPOSIT' }, { amount: record.credit, type: 'WITHDRAWAL' }] : [{ amount: record.debit, type: 'WITHDRAWAL' }, { amount: record.credit, type: 'DEPOSIT' }];
+        for (const leg of legs.filter((item) => numeric(item.amount) > 0)) {
+            const referenceId = `${job.business_id}:${section.id}:${record.sourceRow}:${leg.type}`;
+            if ((await client.query(`SELECT 1 FROM account_transactions WHERE account_id=$1 AND reference_type='BULK_IMPORT' AND reference_id=$2`, [account.id, referenceId])).rows.length) continue;
+            await recordAccountTransaction(client, { accountId: account.id, transactionType: leg.type, amount: numeric(leg.amount), referenceType: 'BULK_IMPORT', referenceId, createdBy: user.id, notes: `${record.date} · ${record.party || record.ledgerHead || ''} · ${record.particular || record.purpose || ''} · voucher ${record.voucherNumber || '-'}` });
+            posted++;
+        }
+    }
+    return { targetType: 'ACCOUNT', targetId: account.business_id, records: posted, generated: [account.business_id] };
+}
+async function postRawReceivingSection(client, job, section, user) {
+    const options = section.postingOptions || {}, ownerRole = questionAnswer(section, 'ownerRole') || 'company_owned_inventory', ownerMatch = questionAnswer(section, 'ownerMatch') || 'reference_only', warehouseChoice = questionAnswer(section, 'warehouse') || 'ask_user_to_select_warehouse_and_location';
+    if (warehouseChoice === 'reference_only' || ownerMatch === 'reference_only' && ownerRole !== 'company_owned_inventory') return { targetType: 'BULK_IMPORT_REFERENCE', targetId: section.id, records: section.records?.length || 0, generated: [], referenceOnly: true };
+    if (ownerRole === 'vendor_consignment' || ownerRole === 'ask_for_each_product') throw Object.assign(new Error(`${section.title}: choose company-owned inventory or customer-owned storage before posting`), { statusCode: 422 });
+    let location = options.locationBusinessId ? (await client.query(`SELECT * FROM storage_locations WHERE business_id=$1 AND company_id=$2 AND deleted_at IS NULL`, [options.locationBusinessId, user.company_id])).rows[0] : null;
+    let warehouse = location ? (await client.query(`SELECT * FROM warehouses WHERE id=$1`, [location.warehouse_id])).rows[0] : await resolveSelected(client, 'warehouses', options.warehouseBusinessId, user.company_id, `AND deleted_at IS NULL`);
+    if (!warehouse) throw Object.assign(new Error(`${section.title}: select the receiving warehouse before posting`), { statusCode: 422 });
+    if (ownerRole === 'customer_owned_storage' && ownerMatch === 'ask_user_to_select_entity' && !options.customerBusinessId) throw Object.assign(new Error(`${section.title}: select the customer who owns the received goods`), { statusCode: 422 });
+    const ownerName = section.summary?.customer || null; const owner = ownerRole === 'customer_owned_storage' ? await ensureCustomer(client, user, ownerName || 'Imported stock owner', options.customerBusinessId) : null;
+    let posted = 0; const generated = [];
+    for (const record of section.records || []) {
+        const external = `${job.business_id}:${section.id}:${record.sourceRow}`;
+        const existing = (await client.query(`SELECT business_id FROM product_batches WHERE company_id=$1 AND source_reference=$2 LIMIT 1`, [user.company_id, external])).rows[0];
+        if (existing) { generated.push(existing.business_id); continue; }
+        const product = await ensureProduct(client, user, record.productName, record.unit || 'pcs', 'Imported receiving');
+        const batchBusinessId = await generateNextId('PRODUCT_BATCH'), quantity = numeric(record.quantity || record.totalLots);
+        const batch = (await client.query(`INSERT INTO product_batches(business_id,company_id,product_id,owner_customer_id,lot_number,source_reference,received_quantity,available_quantity,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$7,'available',$8) RETURNING *`, [batchBusinessId, user.company_id, product.row.id, owner?.row.id || null, record.externalReference || null, external, quantity, user.id])).rows[0];
+        await recordStockMovement(client, { productId: product.row.id, warehouseId: warehouse.id, movementType: 'IN', quantity, referenceType: 'BULK_IMPORT', referenceId: batchBusinessId, createdBy: user.id, notes: `${record.totalKg || 0} kg; source ${section.sheetName}` });
+        if (location) await client.query(`INSERT INTO batch_location_balances(batch_id,location_id,quantity) VALUES($1,$2,$3) ON CONFLICT(batch_id,location_id) DO UPDATE SET quantity=batch_location_balances.quantity+EXCLUDED.quantity`, [batch.id, location.id, quantity]);
+        const grnBusinessId = await generateNextId('GOODS_RECEIPT');
+        await client.query(`INSERT INTO goods_receipts(business_id,company_id,batch_id,customer_id,warehouse_id,received_quantity,condition_notes,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9::date,CURRENT_DATE))`, [grnBusinessId, user.company_id, batch.id, owner?.row.id || null, warehouse.id, quantity, `Imported ${record.totalKg || 0} kg; vehicle ${record.vehicleNumber || '-'}`, user.id, record.receivedDate || null]);
+        generated.push(batchBusinessId, grnBusinessId); posted++;
+    }
+    return { targetType: 'WAREHOUSE', targetId: warehouse.business_id, records: posted, generated };
+}
+async function postBalanceSummarySection(client, job, section, user) {
+    const target = questionAnswer(section, 'postingTarget') || 'create_customer_opening_balances';
+    if (target === 'reconciliation_only' || target === 'skip_section') return { targetType: 'BULK_IMPORT_REFERENCE', targetId: section.id, records: section.records?.length || 0, generated: [], referenceOnly: true };
+    let posted = 0, createdCustomers = 0; const generated = [];
+    for (const record of section.records || []) {
+        const customer = await ensureCustomer(client, user, record.partyName, null); if (customer.created) createdCustomers++;
+        const due = Math.max(0, numeric(record.total)); if (due <= 0) continue;
+        const sourceId = `${job.business_id}:${section.id}:${record.sourceRow}`;
+        if ((await client.query(`SELECT 1 FROM customer_receivables WHERE source_type='BULK_IMPORT_OPENING' AND source_id=$1`, [sourceId])).rows.length) continue;
+        const receivable = await createReceivable(client, { companyId: user.company_id, customerId: customer.row.id, sourceType: 'BULK_IMPORT_OPENING', sourceId, description: `Imported opening due from ${section.sheetName}`, amount: due, dueDate: new Date().toISOString().slice(0, 10) });
+        generated.push(receivable.id); posted++;
+    }
+    return { targetType: 'CUSTOMER_RECEIVABLE', targetId: generated[0] || null, records: posted, createdCustomers, generated };
+}
+async function postCustomerLedgerSection(client, job, section, user) {
+    const options = section.postingOptions || {}, data = JSON.parse(JSON.stringify(section.data || {})), warehouseChoice = questionAnswer(section, 'warehouse'), customerChoice = questionAnswer(section, 'customerMatch'), entityRole = questionAnswer(section, 'entityRole');
+    if (warehouseChoice === 'reference_only' || customerChoice === 'skip_entity' || entityRole === 'other') return { targetType: 'BULK_IMPORT_REFERENCE', targetId: section.id, records: section.records?.length || 0, generated: [], referenceOnly: true };
+    if (customerChoice === 'ask_user_to_select_existing_customer' && !options.customerBusinessId) throw Object.assign(new Error(`${section.title}: select the existing customer before posting`), { statusCode: 422 });
+    if (!data.customer || !Array.isArray(data.goodsReceipts)) throw Object.assign(new Error(`${section.title}: structured customer ledger data is unavailable`), { statusCode: 422 });
+    for (const receipt of data.goodsReceipts) receipt.externalReference = `${section.id}:${receipt.externalReference}`;
+    for (const delivery of data.deliveries || []) { delivery.externalReference = `${section.id}:${delivery.externalReference}`; delivery.batchExternalReference = `${section.id}:${delivery.batchExternalReference}`; }
+    const warehouse = await resolveSelected(client, 'warehouses', options.warehouseBusinessId, user.company_id, `AND deleted_at IS NULL`);
+    const account = (data.payments || []).length ? await resolveSelected(client, 'accounts', options.accountBusinessId, user.company_id, `AND deleted_at IS NULL AND status='active'`) : null;
+    const pseudoJob = { ...job, extraction_result: data, validation_errors: [], submission_options: { customerBusinessId: options.customerBusinessId || '', warehouseBusinessId: warehouse?.business_id || '', locationBusinessId: options.locationBusinessId || '', accountBusinessId: account?.business_id || '', confirmAdjustments: true } };
+    const outcome = await submitStructured(client, pseudoJob, user); if (outcome.errors) throw Object.assign(new Error(outcome.errors.map((item) => item.message).join('; ')), { statusCode: 422 });
+    return { targetType: 'CUSTOMER', targetId: outcome.customerBusinessId, records: outcome.imported, generated: outcome.generated?.map((item) => item.code) || [], summary: outcome.summary };
+}
+async function postMultiDomainSection(client, job, section, user) {
+    if (section.type === 'employee_payroll') return postPayrollSection(client, job, section, user);
+    if (section.type === 'outsourced_security_payroll') return postSecuritySection(client, job, section, user);
+    if (section.type === 'account_transactions') return postAccountSection(client, job, section, user);
+    if (section.type === 'raw_material_receiving') return postRawReceivingSection(client, job, section, user);
+    if (section.type === 'customer_balance_summary') return postBalanceSummarySection(client, job, section, user);
+    if (section.type === 'customer_stock_rental_ledger') return postCustomerLedgerSection(client, job, section, user);
+    throw Object.assign(new Error(`No operational posting adapter exists for ${section.type}`), { statusCode: 422 });
+}
 async function routeApprovedMultiDomain(client, job, user) {
     const sections = (job.extraction_result?.sections || []).filter((section) => section.selected);
     const routed = [];
-    for (const section of sections) {
+    for (let index = 0; index < sections.length; index++) {
+        const section = sections[index], savepoint = `import_section_${index}`;
         const department = sectionDepartment(section.type);
-        const requestBusinessId = await generateNextId('PORTAL_REQUEST');
-        const details = { importBusinessId: job.business_id, sectionId: section.id, type: section.type, sourceSheet: section.sheetName, periodKey: section.periodKey || null, recordCount: section.records?.length || 0, summary: section.summary || {}, questions: section.questions || [] };
-        const request = (await client.query(`INSERT INTO portal_requests(business_id,company_id,requester_user_id,request_type,department,subject,body,status,submitted_at,details) VALUES($1,$2,$3,'DATA_IMPORT',$4,$5,$6,'submitted',now(),$7::jsonb) RETURNING *`, [requestBusinessId, user.company_id, user.id, department, `Approved data import: ${section.title}`, `Review and post ${section.records?.length || 0} extracted records from ${section.sheetName}.`, JSON.stringify(details)])).rows[0];
-        await client.query(`INSERT INTO bulk_import_postings(job_id,record_type,external_key,target_entity_type,target_entity_id,status,details) VALUES($1,$2,$3,'PORTAL_REQUEST',$4,'pending_department_posting',$5::jsonb) ON CONFLICT(job_id,record_type,external_key) DO NOTHING`, [job.id, section.type, section.fingerprint, request.business_id, JSON.stringify(details)]);
-        routed.push({ sectionId: section.id, department, requestBusinessId: request.business_id, records: section.records?.length || 0 });
+        const already = (await client.query(`SELECT * FROM bulk_import_postings WHERE job_id=$1 AND record_type=$2 AND external_key=$3 AND status='posted'`, [job.id, section.type, section.fingerprint])).rows[0];
+        if (already) { routed.push({ sectionId: section.id, department, status: 'posted', records: numeric(already.details?.records), result: already.details, skippedExisting: true }); continue; }
+        await client.query(`SAVEPOINT ${savepoint}`);
+        try {
+            const result = await postMultiDomainSection(client, job, section, user);
+            const details = { sectionId: section.id, title: section.title, sourceSheet: section.sheetName, department, records: result.records || 0, generated: result.generated || [], result, postedAt: new Date().toISOString() };
+            await client.query(`INSERT INTO bulk_import_postings(job_id,record_type,external_key,target_entity_type,target_entity_id,status,details) VALUES($1,$2,$3,$4,$5,'posted',$6::jsonb) ON CONFLICT(job_id,record_type,external_key) DO UPDATE SET target_entity_type=EXCLUDED.target_entity_type,target_entity_id=EXCLUDED.target_entity_id,status='posted',details=EXCLUDED.details`, [job.id, section.type, section.fingerprint, result.targetType || null, result.targetId || null, JSON.stringify(details)]);
+            await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+            routed.push({ sectionId: section.id, department, status: 'posted', records: result.records || 0, result: details });
+        } catch (error) {
+            await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`); await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+            const details = { sectionId: section.id, title: section.title, sourceSheet: section.sheetName, department, records: 0, error: error.message, failedAt: new Date().toISOString() };
+            await client.query(`INSERT INTO bulk_import_postings(job_id,record_type,external_key,status,details) VALUES($1,$2,$3,'failed',$4::jsonb) ON CONFLICT(job_id,record_type,external_key) DO UPDATE SET status='failed',details=EXCLUDED.details`, [job.id, section.type, section.fingerprint, JSON.stringify(details)]);
+            routed.push({ sectionId: section.id, department, status: 'failed', records: 0, error: error.message });
+        }
     }
     return routed;
 }
@@ -191,13 +376,29 @@ async function decideApproval(req, res) {
             return { job: updated, action: 'advanced', step, nextStep: steps[index + 1] };
         }
         const routed = await routeApprovedMultiDomain(client, job, req.user);
-        const summary = { selectedSections: routed.length, records: routed.reduce((sum, item) => sum + item.records, 0), routed };
-        const updated = (await client.query(`UPDATE bulk_import_jobs SET status='submitted',final_approved_by=$1,final_approved_at=now(),approval_notes=$2,submission_result=$3::jsonb WHERE id=$4 RETURNING *`, [req.user.id, notes, JSON.stringify(summary), job.id])).rows[0];
+        const failed = routed.filter((item) => item.status === 'failed').length, posted = routed.filter((item) => item.status === 'posted').length;
+        const finalStatus = failed ? (posted ? 'partially_posted' : 'posting_failed') : 'submitted';
+        const summary = { selectedSections: routed.length, postedSections: posted, failedSections: failed, records: routed.reduce((sum, item) => sum + item.records, 0), routed };
+        const updated = (await client.query(`UPDATE bulk_import_jobs SET status=$1,final_approved_by=$2,final_approved_at=now(),approval_notes=$3,submission_result=$4::jsonb,submitted_by=$2,submitted_at=CASE WHEN $1='submitted' THEN now() ELSE submitted_at END WHERE id=$5 RETURNING *`, [finalStatus, req.user.id, notes, JSON.stringify(summary), job.id])).rows[0];
         await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,$2,$3,'routed',$4,$5)`, [job.id, index, step.name, `${notes} Routed ${routed.length} section(s).`, req.user.id]);
-        return { job: updated, action: 'routed', step, routed };
+        return { job: updated, action: failed ? 'posting_failed' : 'posted', step, routed };
     });
     await logAction({ actorUserId: req.user.id, action: `BULK_IMPORT_${result.action.toUpperCase()}`, entityType: 'BULK_IMPORT', entityId: req.params.businessId, after: { notes, routed: result.routed?.length || 0 } });
-    res.json({ job: await reviewContext(result.job, req.user.company_id), action: result.action, nextStep: result.nextStep || null, routed: result.routed || [], message: result.action === 'routed' ? 'All approval layers completed; selected sections were routed to their departments.' : result.action === 'advanced' ? `Approved and moved to ${result.nextStep.name}` : `Import ${result.action}` });
+    res.json({ job: await reviewContext(result.job, req.user.company_id), action: result.action, nextStep: result.nextStep || null, routed: result.routed || [], message: result.action === 'posted' ? 'All approval layers completed and selected records were posted to their ERP modules.' : result.action === 'posting_failed' ? 'Approval completed, but one or more sections need destination correction before retrying.' : result.action === 'advanced' ? `Approved and moved to ${result.nextStep.name}` : `Import ${result.action}` });
+}
+async function postApprovedResults(req, res) {
+    const result = await withTransaction(async (client) => {
+        const job = (await client.query(`SELECT * FROM bulk_import_jobs WHERE business_id=$1 AND company_id=$2 AND extraction_result->>'mode'='multi_domain' AND final_approved_at IS NOT NULL AND status IN('submitted','partially_posted','posting_failed') FOR UPDATE`, [req.params.businessId, req.user.company_id])).rows[0];
+        if (!job) throw Object.assign(new Error('A finally approved multi-department import is required'), { statusCode: 409 });
+        const routed = await routeApprovedMultiDomain(client, job, req.user);
+        const failed = routed.filter((item) => item.status === 'failed').length, posted = routed.filter((item) => item.status === 'posted').length;
+        const status = failed ? (posted ? 'partially_posted' : 'posting_failed') : 'submitted';
+        const summary = { selectedSections: routed.length, postedSections: posted, failedSections: failed, records: routed.reduce((sum, item) => sum + item.records, 0), routed };
+        const updated = (await client.query(`UPDATE bulk_import_jobs SET status=$1,submission_result=$2::jsonb,submitted_by=CASE WHEN $1='submitted' THEN $3 ELSE submitted_by END,submitted_at=CASE WHEN $1='submitted' THEN COALESCE(submitted_at,now()) ELSE submitted_at END WHERE id=$4 RETURNING *`, [status, JSON.stringify(summary), req.user.id, job.id])).rows[0];
+        return { job: updated, routed, summary };
+    });
+    await logAction({ actorUserId: req.user.id, action: 'BULK_IMPORT_OPERATIONAL_POST_RETRIED', entityType: 'BULK_IMPORT', entityId: req.params.businessId, after: result.summary });
+    res.json({ job: await reviewContext(result.job, req.user.company_id), ...result.summary, message: result.summary.failedSections ? `${result.summary.postedSections} sections posted; ${result.summary.failedSections} still require correction.` : `${result.summary.postedSections} sections posted successfully.` });
 }
 async function submitFlat(client, job, user) {
     const map = job.field_mapping;
@@ -355,4 +556,4 @@ async function remove(req, res) {
     res.json({ message: 'Review import removed' });
 }
 
-module.exports = { upload, list, get, updateMapping: updateReview, submitForApproval, decideApproval, submit, template, remove };
+module.exports = { upload, list, get, updateMapping: updateReview, submitForApproval, decideApproval, postApprovedResults, submit, template, remove };

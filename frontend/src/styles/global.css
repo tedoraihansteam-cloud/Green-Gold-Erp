@@ -131,6 +131,11 @@ input:focus, select:focus, textarea:focus { border-color: var(--input-focus); bo
 .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .error-banner { background: var(--rust-100); color: var(--rust-600); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 14px; }
 .success-banner { background: var(--moss-100); color: var(--moss-600); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 14px; }
+.info-banner { background: var(--paddy-100); color: var(--paddy-800); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 14px; }
+.detail-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; }
+.detail-item { min-width:0; padding:10px 12px; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--paper); }
+.detail-item span { display:block; color:var(--ink-600); font-size:11px; text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px; }
+.detail-item strong { display:block; overflow-wrap:anywhere; font-size:13px; }
 
 /* ---------- Status pills ---------- */
 .pill { display: inline-flex; align-items: center; font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; text-transform: capitalize; }
