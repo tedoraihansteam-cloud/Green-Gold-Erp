@@ -107,7 +107,9 @@ function CompanyProfile({ company, reload, section = 'all' }) {
     const set = (name, value) => setForm((v) => ({ ...v, [name]: value }));
     async function save() { try { await api.put('/company-settings', form); setMessage('Saved company identity'); reload(); } catch (e) { setMessage(e.message); } }
     async function upload(kind, file) { if (!file) return; const data = new FormData(); data.append('file', file); try { await api.postForm(`/company-settings/assets/${kind}`, data); setMessage(`Saved ${kind}`); reload(); } catch (e) { setMessage(e.message); } }
-    async function addSite() { try { await api.post('/company-settings/sites', site); setSite({ siteType: 'office' }); setMessage('Saved company location'); reload(); } catch (e) { setMessage(e.message); } }
+    async function addSite() { try { if (site.id) await api.put(`/company-settings/sites/${site.id}`, site); else await api.post('/company-settings/sites', site); const edited = !!site.id; setSite({ siteType: 'office' }); setMessage(edited ? 'Saved location changes' : 'Saved company location'); reload(); } catch (e) { setMessage(e.message); } }
+    function editSite(row) { setSite({ id: row.id, siteType: row.site_type, name: row.name || '', address: row.address || '', contactName: row.contact_name || '', contactPhone: row.contact_phone || '', latitude: row.latitude || '', longitude: row.longitude || '', isDocumentAddress: !!row.is_document_address }); setMessage(''); }
+    async function removeSite(row) { if (!window.confirm(`Delete location “${row.name}”? Departments and devices will be detached, not deleted.`)) return; try { const result = await api.del(`/company-settings/sites/${row.id}`); if (site.id === row.id) setSite({ siteType: 'office' }); setMessage(`Deleted location. ${result.detachedDepartments || 0} department(s) and ${result.detachedDevices || 0} device(s) detached.`); reload(); } catch (e) { setMessage(e.message); } }
     return <>
         {(section === 'all' || section === 'company') && <section className="card">
             <h2>Company identity and document branding</h2>
@@ -128,8 +130,9 @@ function CompanyProfile({ company, reload, section = 'all' }) {
                 {[['name', 'Location name'], ['address', 'Full address'], ['contactName', 'Contact person'], ['contactPhone', 'Contact phone']].map(([name, label]) => <div className="field" key={name}><label>{label}</label><input value={site[name] || ''} onChange={(e) => setSite((v) => ({ ...v, [name]: e.target.value }))} /></div>)}
                 <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}><input type="checkbox" checked={!!site.isDocumentAddress} onChange={(e) => setSite((v) => ({ ...v, isDocumentAddress: e.target.checked }))} /> Use this address on generated documents</label>
             </div>
-            <div className="form-actions"><button className="btn btn-primary" onClick={addSite}>Add location</button></div>
-            {(company?.sites || []).map((x) => <div key={x.id} style={{ padding: '10px 0', borderTop: '1px solid var(--line)' }}><strong>{x.name}</strong> · {x.site_type}{x.is_document_address ? ' · Document address' : ''}<div className="hint">{x.address || 'No address recorded'}</div></div>)}
+            {message && <div className={/Saved|Deleted/.test(message) ? 'success-banner' : 'error-banner'}>{message}</div>}
+            <div className="form-actions">{site.id && <button className="btn btn-secondary" onClick={() => setSite({ siteType: 'office' })}>Cancel edit</button>}<button className="btn btn-primary" onClick={addSite}>{site.id ? 'Save location changes' : 'Add location'}</button></div>
+            {(company?.sites || []).map((x) => <div key={x.id} style={{ padding: '12px 0', borderTop: '1px solid var(--line)', display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}><div><strong>{x.name}</strong> · {x.site_type}{x.is_document_address ? ' · Document address' : ''}<div className="hint">{x.address || 'No address recorded'}</div><div className="hint">{[x.contact_name, x.contact_phone].filter(Boolean).join(' · ')}</div></div><div style={{ display: 'flex', gap: 6 }}><button className="btn btn-secondary btn-sm" onClick={() => editSite(x)}>Edit</button><button className="btn btn-danger btn-sm" onClick={() => removeSite(x)}>Delete</button></div></div>)}
         </section>}
     </>;
 }
