@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { api, downloadApiFile } from '../../lib/apiClient';
 import { useApi } from '../../lib/useApi';
 import StructuredReviewEditor from './StructuredReviewEditor';
+import MultiDomainReview from './MultiDomainReview';
 
 const money = (value) => `৳${Number(value || 0).toLocaleString()}`;
 
@@ -38,9 +39,10 @@ export default function UniversalBulkImport() {
         finally { setBusy(false); }
     }
     async function submit() {
+        if (multiDomain) return setMessage('Final posting is locked for this demo. Save the extraction review; no live ERP data will be changed until you confirm the results.');
         setBusy(true);
         try {
-            await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured ? extractionDraft : undefined });
+            await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured || multiDomain ? extractionDraft : undefined });
             const result = await api.post(`/bulk-imports/${active.business_id}/submit`, {});
             setMessage(`${result.imported} approved records and units were routed successfully. Customer, stock, charges, dues, payments, receipts, and identities are synchronized.`);
             setActive(null); reload();
@@ -51,7 +53,7 @@ export default function UniversalBulkImport() {
     }
     async function saveReview() {
         setBusy(true);
-        try { const result = await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured ? extractionDraft : undefined }); loadReview(result.job); setMessage('Edited review saved and all stock, charge, payment, and due totals were recalculated.'); reload(); }
+        try { const result = await api.put(`/bulk-imports/${active.business_id}/mapping`, { fieldMapping: mapping, submissionOptions: options, extractionResult: structured || multiDomain ? extractionDraft : undefined }); loadReview(result.job); setMessage(multiDomain ? 'Multi-department extraction review saved safely. No operational ERP data was posted.' : 'Edited review saved and all stock, charge, payment, and due totals were recalculated.'); reload(); }
         catch (error) { setMessage(error.message); }
         finally { setBusy(false); }
     }
@@ -62,6 +64,7 @@ export default function UniversalBulkImport() {
     const columns = active?.detected_columns || [];
     const extraction = extractionDraft || active?.extraction_result || {};
     const structured = extraction.mode === 'structured';
+    const multiDomain = extraction.mode === 'multi_domain';
     const context = active?.review_context || {};
     const summary = active?.source_summary || {};
 
@@ -69,8 +72,8 @@ export default function UniversalBulkImport() {
         <h2>Universal data upload and automation</h2>
         <p className="hint">Upload → automatic document detection and calculation → review → final submission. Approved records are routed to the relevant departments and receive permanent identities.</p>
         <div className="form-grid">
-            <div className="field"><label>Document type</label><select value={type} onChange={(event) => setType(event.target.value)}><option value="auto">Auto-detect any supported business data</option><option value="stock_report">Customer stock, rental, payment or due report</option><option value="raw_material_report">Raw-material drum/bag receiving workbook</option><option value="customer">Customer list</option><option value="product">Product list</option><option value="vendor">Vendor or supplier list</option></select></div>
-            <div className="field"><label>Data file</label><input type="file" accept=".csv,.json,.xlsx,.xlsm" onChange={(event) => setFile(event.target.files?.[0])} /></div>
+            <div className="field"><label>Document type</label><select value={type} onChange={(event) => setType(event.target.value)}><option value="auto">Auto-detect all departments and data</option><option value="payroll">Payroll / HR / attendance</option><option value="accounts">Accounts and transactions</option><option value="stock_report">Customer stock, rental, payment or due report</option><option value="raw_material_report">Raw-material receiving workbook</option><option value="document">Business Word document</option><option value="staff">Staff master data</option><option value="customer">Customer list</option><option value="product">Product list</option><option value="vendor">Vendor or supplier list</option></select></div>
+            <div className="field"><label>Data file</label><input type="file" accept=".csv,.json,.xlsx,.xls,.xlsm,.docx" onChange={(event) => setFile(event.target.files?.[0])} /></div>
         </div>
         <div className="form-actions">{['customer', 'product', 'vendor'].includes(type) && <button className="btn btn-secondary" onClick={() => downloadApiFile(`/bulk-imports/template/${type}`, `${type}-bulk-upload-template.csv`)}>Download optional template</button>}<button className="btn btn-primary" disabled={busy} onClick={upload}>{busy ? 'Reading document…' : 'Upload, read and review'}</button></div>
         {message && <div className={/successfully|detected|synchronized|loaded|removed|saved|recalculated/i.test(message) ? 'success-banner' : 'error-banner'}>{message}</div>}
@@ -79,7 +82,7 @@ export default function UniversalBulkImport() {
             <div className="card-header"><div><h3>Review {active.original_name}</h3><p className="card-subtitle">Detected as <strong>{String(active.detected_document_type || active.import_type).replace(/_/g, ' ')}</strong> · {active.business_id}</p></div><span className="pill">{active.status}</span></div>
             {(active.validation_errors || []).length > 0 && <div className="error-banner"><strong>Validation requires attention</strong>{active.validation_errors.slice(0, 12).map((error, index) => <div key={index}>{error.row ? `Row ${error.row}: ` : ''}{error.field} - {error.message}</div>)}</div>}
 
-            {structured ? <>
+            {multiDomain ? <MultiDomainReview extraction={extraction} setExtraction={setExtractionDraft} context={context} /> : structured ? <>
                 <StructuredReviewEditor extraction={extraction} setExtraction={setExtractionDraft} context={context} options={options} setOptions={setOptions} />
                 <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', margin: '14px 0' }}>
                     {[['Received', `${Number(summary.receivedLots || 0).toLocaleString()} units`], ['Delivered', `${Number(summary.deliveredLots || 0).toLocaleString()} units`], ['In stock', `${Number(summary.inStockLots || 0).toLocaleString()} units`], ...(summary.totalKg ? [['Weight', `${Number(summary.totalKg).toLocaleString()} kg`]] : []), ['Total charged', money(summary.totalCharged)], ['Payments', money(summary.paymentsReceived)], ['Due', money(summary.totalDue)]].map(([label, value]) => <div className="stat-card" key={label}><div className="label">{label}</div><div className="value" style={{ fontSize: 20 }}>{value}</div></div>)}
@@ -113,6 +116,7 @@ export default function UniversalBulkImport() {
                 <div style={{ overflowX: 'auto' }}><table className="data"><thead><tr><th>Row</th>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.slice(0, 10).map((row, index) => <tr key={index}><td>{index + 2}</td>{columns.map((column) => <td key={column}>{row[column]}</td>)}</tr>)}</tbody></table></div>
                 <p className="hint">Showing 10 of {rows.length} rows. Final submission imports the complete validated file.</p>
             </>}
+            {multiDomain && <div className="success-banner"><strong>Demo control:</strong> save your extraction review below. Final department posting is disabled until you confirm this demo.</div>}
             {active.status === 'review' && <div className="form-actions"><button className="btn btn-secondary" onClick={removeActive}>Remove review upload</button><button className="btn btn-secondary" disabled={busy} onClick={saveReview}>Save edited review</button><button className="btn btn-primary" disabled={busy} onClick={submit}>{busy ? 'Posting approved records…' : 'Approve and submit to departments'}</button></div>}
         </div>}
 
