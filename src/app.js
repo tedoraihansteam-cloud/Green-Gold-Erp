@@ -18,6 +18,7 @@ app.use(express.json({ limit: '2mb' }));
 // assets so the frontend can display or print them directly.
 app.use('/files/qrcodes', express.static(path.join(__dirname, '..', 'storage', 'qrcodes')));
 app.use('/files/barcodes', express.static(path.join(__dirname, '..', 'storage', 'barcodes')));
+app.use('/files/profile-photos', express.static(path.join(__dirname, '..', 'storage', 'profile-photos')));
 
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 

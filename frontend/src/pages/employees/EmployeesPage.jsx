@@ -7,6 +7,7 @@ import Modal from '../../components/Modal';
 import Pill from '../../components/Pill';
 import { IconPlus } from '../../components/Icons';
 import BusinessIdentifier from '../../components/BusinessIdentifier';
+import { Link } from 'react-router-dom';
 
 export default function EmployeesPage() {
     const { can } = useAuth();
@@ -97,7 +98,7 @@ export default function EmployeesPage() {
                     <DataTable
                         columns={[
                             { key: 'business_id', label: 'ID', render: (r) => <BusinessIdentifier entityType="EMPLOYEE" businessId={r.business_id} /> },
-                            { key: 'full_name', label: 'Name' },
+                            { key: 'full_name', label: 'Name', render: (r) => <Link to={`/employees/${r.business_id}`}>{r.full_name}</Link> },
                             { key: 'designation', label: 'Designation' },
                             {key:'department_name',label:'Department',render:r=>r.department_name?`${r.department_code} — ${r.department_name}`:'Not assigned'},
                             {key:'site_name',label:'Location',render:r=>r.site_name||r.branch_name||'Not assigned'},

@@ -7,6 +7,7 @@ const c = require('../controllers/documentController');
 const router = express.Router();
 router.use(requireAuth);
 router.get('/entity/:entityType/:businessId.pdf', asyncHandler(c.entityPdf));
+router.get('/cards/:entityType/:businessId.pdf', asyncHandler(c.identityCardPdf));
 router.get('/identifiers/batch.zip', asyncHandler(c.batchIdentifiers));
 router.get('/reports/balance-sheet.:format(pdf|csv)', requirePermission('ACCOUNTS_VIEW'), asyncHandler(c.balanceSheetExport));
 router.get('/reports/machine-logs.:format(pdf|csv)', requirePermission('MANUFACTURING_VIEW'), asyncHandler(c.machineLogsExport));
