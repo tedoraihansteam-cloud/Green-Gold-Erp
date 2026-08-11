@@ -36,10 +36,35 @@ function question(key, label, options, recommended = '', help = '') {
     return { key, label, type: 'select', required: true, options, value: recommended, help };
 }
 function makeSection({ type, title, sheetName, range, confidence, records, columns, summary, data = null, questions = [], selected = true, postingMode = 'review_only', warnings = [] }) {
-    const section = { id: `${safeId(sheetName)}-${safeId(type)}-${safeId(title)}`, type, title, sheetName, range, confidence, selected, postingMode, records, columns, summary, data, questions, warnings };
+    const section = { id: `${safeId(sheetName)}-${safeId(type)}-${safeId(title)}`, type, title, sheetName, range, confidence, selected, postingMode, records, sourceSnapshot: JSON.parse(JSON.stringify(records || [])), columns, summary, data, questions, warnings };
     section.periodKey = periodKey(`${sheetName} ${title}`);
     section.fingerprint = fingerprint({ type, periodKey: section.periodKey, records });
     return section;
+}
+
+const rowKey = (row, index) => String(row?.sourceRow ?? row?.sourceLine ?? `row-${index}`);
+const sameValue = (a, b) => typeof a === 'number' || typeof b === 'number' ? Math.abs(amount(a) - amount(b)) < 0.005 : text(a) === text(b);
+function manualReview(section) {
+    const source = section.sourceSnapshot || [], current = section.records || [], sourceByKey = new Map(source.map((row, index) => [rowKey(row, index), row]));
+    const currentByKey = new Map(current.filter((row) => !row.manualEntry).map((row, index) => [rowKey(row, index), row]));
+    const mismatches = [], numericDifferences = {};
+    for (const [key, original] of sourceByKey) {
+        const edited = currentByKey.get(key);
+        if (!edited) { mismatches.push({ row: key, field: 'record', source: 'present', entered: 'removed' }); for (const [field, value] of Object.entries(original)) if (typeof value === 'number') numericDifferences[field] = rounded((numericDifferences[field] || 0) - value); continue; }
+        for (const field of new Set([...Object.keys(original), ...Object.keys(edited)])) {
+            if (['manualEntry', 'manualNote'].includes(field) || sameValue(original[field], edited[field])) continue;
+            if (original[field] == null || original[field] === '') continue;
+            mismatches.push({ row: key, field, source: original[field], entered: edited[field] });
+            if (typeof original[field] === 'number' || typeof edited[field] === 'number') numericDifferences[field] = rounded((numericDifferences[field] || 0) + amount(edited[field]) - amount(original[field]));
+        }
+    }
+    const formulaDifferences = [];
+    for (const [index, row] of section.manualMode ? current.entries() : []) {
+        if (section.type === 'raw_material_receiving') { const difference = rounded(amount(row.totalKg) - amount(row.quantity) * amount(row.kgPerUnit)); if (difference) formulaDifferences.push({ row: rowKey(row, index), formula: 'totalKg = quantity × kgPerUnit', difference }); }
+        if (section.type.includes('payroll')) { const gross = amount(row.grossSalary) || amount(row.basicSalary) + amount(row.houseRent) + amount(row.firstIncrement) + amount(row.secondIncrement) + amount(row.conveyanceAllowance) + amount(row.medicalAllowance) + amount(row.da) + amount(row.utilityAllowance) + amount(row.otherAllowance); const deductions = amount(row.totalDeduction) || amount(row.advance) + amount(row.absenceDeduction) + amount(row.otherDeduction); if (row.netPayable !== undefined) { const difference = rounded(amount(row.netPayable) - (gross - deductions)); if (difference) formulaDifferences.push({ row: rowKey(row, index), formula: 'netPayable = gross − deductions', difference }); } }
+    }
+    const nonZeroDifferences = Object.entries(numericDifferences).filter(([, value]) => Math.abs(value) >= 0.005).map(([field, difference]) => ({ field, difference }));
+    return { mismatches, numericDifferences, nonZeroDifferences, formulaDifferences, manualRows: current.filter((row) => row.manualEntry).length };
 }
 
 function findHeader(rows, aliasGroups, maxRows = 160) {
@@ -264,7 +289,7 @@ async function analyzeMultiDomainFile(file, requestedType='auto') {
         const summary=extractPartySummary(sheet.name,sheet.rows); if(summary) sections.push(summary);
         sections.push(...extractReceivingSections(sheet.name,sheet.rows));
     }
-    if (!sections.length) return null;
+    if (!sections.length) sections.push(makeSection({type:'manual_data_entry',title:'Manual document review',sheetName:sheets[0]?.name||'Workbook',range:'undetected document content',confidence:0.2,records:[],columns:['description','amount','quantity','notes'],summary:{detectedRecords:0},questions:[question('postingTarget','How should this undetected document be handled?',['reference_only'],'reference_only')],postingMode:'review_only',warnings:['No operational table was detected. Enter missing rows and define the actual customer, vendor, staff member, or other entity manually.']}));
     return buildMultiResult(file.originalname,sourceHash,sheets,sections,requestedType);
 }
 function buildMultiResult(originalName,sourceHash,sheets,sections) {
@@ -276,8 +301,8 @@ function buildMultiResult(originalName,sourceHash,sheets,sections) {
 function recalculateMultiDomainReview(input) {
     if(!input||input.mode!=='multi_domain')throw Object.assign(new Error('Multi-domain extraction is required'),{statusCode:400});
     const seenFingerprints=new Map(),duplicates=[];
-    const sections=(input.sections||[]).map((section)=>{const current={...section,selected:Boolean(section.selected),questions:(section.questions||[]).map((q)=>({...q,value:text(q.value)}))};delete current.duplicateOf;current.periodKey=periodKey(`${current.sheetName} ${current.title}`);current.fingerprint=fingerprint({type:current.type,periodKey:current.periodKey,records:current.records||[]});if(seenFingerprints.has(current.fingerprint)){current.duplicateOf=seenFingerprints.get(current.fingerprint);duplicates.push({sectionId:current.id,duplicateOf:current.duplicateOf});}else seenFingerprints.set(current.fingerprint,current.id);return current;}); const validationErrors=[];
-    for(const section of sections.filter((s)=>s.selected)){for(const q of section.questions||[]){if(q.required&&!q.value)validationErrors.push({field:`${section.id}.${q.key}`,message:`${section.title}: ${q.label}`});}}
+    const sections=(input.sections||[]).map((section)=>{const current={...section,selected:Boolean(section.selected),questions:(section.questions||[]).map((q)=>({...q,value:text(q.value)}))};if(current.type==='customer_stock_rental_ledger'&&current.data)current.data={...current.data,goodsReceipts:current.records||[]};delete current.duplicateOf;current.periodKey=periodKey(`${current.sheetName} ${current.title}`);current.fingerprint=fingerprint({type:current.type,periodKey:current.periodKey,records:current.records||[]});if(seenFingerprints.has(current.fingerprint)){current.duplicateOf=seenFingerprints.get(current.fingerprint);duplicates.push({sectionId:current.id,duplicateOf:current.duplicateOf});}else seenFingerprints.set(current.fingerprint,current.id);return current;}); const validationErrors=[];
+    for(const section of sections.filter((s)=>s.selected)){for(const q of section.questions||[]){if(q.required&&!q.value)validationErrors.push({field:`${section.id}.${q.key}`,message:`${section.title}: ${q.label}`});}const review=manualReview(section);section.manualReview=review;if(review.mismatches.length&&(!section.manualOverride?.confirmed||!text(section.manualOverride?.reason)))validationErrors.push({field:`${section.id}.manualOverride`,message:`${section.title}: confirm the ${review.mismatches.length} source mismatch(es) and enter an override reason`});for(const item of review.nonZeroDifferences)validationErrors.push({field:`${section.id}.${item.field}`,message:`${section.title}: ${item.field} reconciliation difference must equal zero (currently ${item.difference})`});for(const item of review.formulaDifferences)validationErrors.push({field:`${section.id}.${item.formula}`,message:`${section.title}: row ${item.row} calculation difference must equal zero (currently ${item.difference})`});}
     for(const entity of input.entityCandidates||[]){if(entity.selected&&!entity.role)validationErrors.push({severity:'warning',field:`entity.${entity.id}`,message:`Confirm whether ${entity.name} is a customer, vendor, staff member, or another party.`});}
     const extractionResult={...input,sections,duplicates,reviewedAt:new Date().toISOString()}; const sourceSummary={sourceHash:input.sourceHash,sheets:input.workbook?.sheetCount||0,sections:sections.length,selectedSections:sections.filter((s)=>s.selected).length,records:sections.filter((s)=>s.selected).reduce((sum,s)=>sum+(s.records||[]).length,0),entityCandidates:(input.entityCandidates||[]).length,duplicates:duplicates.length,sectionTypes:Object.fromEntries([...new Set(sections.map((s)=>s.type))].map((type)=>[type,sections.filter((s)=>s.type===type&&s.selected).length]))};
     const routingPlan=[...new Set(sections.filter((s)=>s.selected).map((s)=>s.type))].map((type)=>({department:type.includes('payroll')?'HR / Accounts':type==='account_transactions'?'Accounts':type.includes('receiving')?'Inventory / Cold Storage':type.includes('customer')?'Customer Management / Accounts':'Management Review',recordType:type,count:sections.filter((s)=>s.type===type&&s.selected).reduce((sum,s)=>sum+(s.records||[]).length,0),action:'Stage selected records for destination review; no operational posting occurs until destination approval'}));
