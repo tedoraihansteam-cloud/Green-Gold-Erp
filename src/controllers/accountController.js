@@ -81,6 +81,7 @@ async function createAccount(req, res) {
         const acct = rows[0];
 
         if (Number(openingBalance) > 0) {
+            await client.query(`UPDATE accounts SET opening_balance=$1 WHERE id=$2`,[openingBalance,acct.id]);
             await recordAccountTransaction(client, {
                 accountId: acct.id, transactionType: 'DEPOSIT', amount: openingBalance,
                 referenceType: 'OPENING_BALANCE', createdBy: req.user.id
@@ -103,6 +104,9 @@ async function listAccounts(req, res) {
     );
     res.json({ accounts: rows });
 }
+
+async function updateAccount(req,res){const {name,bankName,bankAccountNumber,openingBalance}=req.body;const account=await withTransaction(async client=>{const control=(await client.query(`SELECT finance_live_at FROM company_operation_controls WHERE company_id=$1`,[req.user.company_id])).rows[0];const row=(await client.query(`SELECT * FROM accounts WHERE business_id=$1 AND company_id=$2 AND deleted_at IS NULL FOR UPDATE`,[req.params.businessId,req.user.company_id])).rows[0];if(!row)throw Object.assign(new Error('Account not found'),{statusCode:404});const txCount=Number((await client.query(`SELECT count(*) count FROM account_transactions WHERE account_id=$1 AND reference_type<>'OPENING_BALANCE'`,[row.id])).rows[0].count);let target=Number(row.opening_balance||0);if(openingBalance!==undefined){if(control?.finance_live_at||txCount)throw Object.assign(new Error('Opening balance is locked after financial operations begin. Use an approved adjustment or reversal.'),{statusCode:409});target=Number(openingBalance);if(!Number.isFinite(target)||target<0)throw Object.assign(new Error('Opening balance must be zero or greater'),{statusCode:400});const delta=target-Number(row.current_balance||0);await client.query(`UPDATE accounts SET opening_balance=$1,current_balance=$1 WHERE id=$2`,[target,row.id]);const opening=(await client.query(`SELECT id FROM account_transactions WHERE account_id=$1 AND reference_type='OPENING_BALANCE' ORDER BY created_at LIMIT 1`,[row.id])).rows[0];if(opening)await client.query(`UPDATE account_transactions SET amount=$1,balance_after=$1,notes='Opening balance updated during setup' WHERE id=$2`,[target,opening.id]);else if(target>0)await recordAccountTransaction(client,{accountId:row.id,transactionType:'DEPOSIT',amount:target,referenceType:'OPENING_BALANCE',createdBy:req.user.id,notes:'Opening balance set during setup'});}return (await client.query(`UPDATE accounts SET name=COALESCE(NULLIF($1,''),name),bank_name=$2,bank_account_number=$3 WHERE id=$4 RETURNING *`,[name,bankName||null,bankAccountNumber||null,row.id])).rows[0];});await logAction({actorUserId:req.user.id,action:'ACCOUNT_SETUP_UPDATED',entityType:'ACCOUNT',entityId:req.params.businessId,after:{name,openingBalance}});res.json({account});}
+async function startFinancialOperations(req,res){const {rows}=await query(`UPDATE company_operation_controls SET finance_live_at=COALESCE(finance_live_at,now()),updated_by=$1,updated_at=now() WHERE company_id=$2 RETURNING finance_live_at`,[req.user.id,req.user.company_id]);await logAction({actorUserId:req.user.id,action:'FINANCIAL_OPERATIONS_STARTED',entityType:'COMPANY',entityId:req.user.company_id});res.json({financeLiveAt:rows[0].finance_live_at,message:'Financial operations are live. Opening balances are now locked.'});}
 
 async function getAccountStatement(req, res) {
     const { rows: accountRows } = await query(
@@ -231,4 +235,4 @@ async function pendingFinancialActions(req,res){const company=req.user.company_i
  query(`SELECT business_id,'CUSTOMER_COMMITMENT' action_type,commitment_notes subject,commitment_amount amount,status,created_at FROM rent_collection_invoices WHERE company_id=$1 AND commitment_date<=CURRENT_DATE AND remaining_due>0`,[company]),
  query(`SELECT business_id,'PAYMENT_REQUEST' action_type,subject,amount,status,created_at FROM portal_requests WHERE company_id=$1 AND requires_accounts=true AND status IN('submitted','accounts_pending')`,[company])]);const actions=results.flatMap(x=>x.rows).sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));res.json({actions,summary:actions.reduce((o,x)=>{o[x.action_type]=(o[x.action_type]||0)+1;return o;},{})});}
 
-module.exports = { createAccount, listAccounts, getAccountStatement, transferFunds, listTransferRequests, reviewTransferRequest, dailyBalanceSheet, pendingFinancialActions, recordAccountTransaction };
+module.exports = { createAccount, updateAccount, startFinancialOperations, listAccounts, getAccountStatement, transferFunds, listTransferRequests, reviewTransferRequest, dailyBalanceSheet, pendingFinancialActions, recordAccountTransaction };
