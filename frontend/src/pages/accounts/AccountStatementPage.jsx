@@ -2,6 +2,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useApi } from '../../lib/useApi';
 import DataTable from '../../components/DataTable';
 import { ReportDownloadActions } from '../../components/DocumentActions';
+import UploadedReferenceHistory from '../../components/UploadedReferenceHistory';
 
 export default function AccountStatementPage() {
     const { businessId } = useParams();
@@ -43,6 +44,7 @@ export default function AccountStatementPage() {
                     emptyMessage="No transactions on this account yet."
                 />
             </div>
+            <UploadedReferenceHistory businessId={businessId}/>
         </div>
     );
 }
