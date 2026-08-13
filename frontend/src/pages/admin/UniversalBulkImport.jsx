@@ -12,6 +12,8 @@ const reviewExtractionPayload = (extraction) => ({
 
 export default function UniversalBulkImport() {
     const { data, reload } = useApi('/bulk-imports');
+    const [referenceQuery,setReferenceQuery]=useState('');
+    const {data:referenceData}=useApi(`/bulk-imports/reference-register${referenceQuery?`?q=${encodeURIComponent(referenceQuery)}`:''}`);
     const [type, setType] = useState('auto');
     const [file, setFile] = useState(null);
     const [active, setActive] = useState(null);
@@ -93,6 +95,7 @@ export default function UniversalBulkImport() {
     return <section className="card">
         <h2>Universal data upload and automation</h2>
         <p className="hint">Upload → extract → preserve as a searchable reference → layered approval. Live ERP records change only when an approved section is explicitly marked for operational posting.</p>
+        <details className="card" style={{padding:14,marginBottom:14}}><summary><strong>Reference register</strong> · historical and staged source rows</summary><div className="field" style={{marginTop:12}}><label>Search reference data</label><input value={referenceQuery} onChange={event=>setReferenceQuery(event.target.value)} placeholder="Customer, product, voucher, workbook or amount"/></div><div style={{overflow:'auto',maxHeight:480}}><table className="data"><thead><tr><th>Import</th><th>Workbook / sheet</th><th>Source</th><th>Classification</th><th>Date</th><th>Extracted data</th></tr></thead><tbody>{(referenceData?.rows||[]).map(row=><tr key={row.id}><td>{row.import_business_id}</td><td>{row.original_name}<div className="hint">{row.sheet_name}</div></td><td>{row.source_row}</td><td>{String(row.disposition).replaceAll('_',' ')}</td><td>{row.effective_date||'—'}</td><td><pre style={{whiteSpace:'pre-wrap',maxWidth:500}}>{JSON.stringify(row.record_data,null,2)}</pre></td></tr>)}</tbody></table></div></details>
         <div className="form-grid">
             <div className="field"><label>Document type</label><select value={type} onChange={(event) => setType(event.target.value)}><option value="auto">Auto-detect all departments and data</option><option value="payroll">Payroll / HR / attendance</option><option value="accounts">Accounts and transactions</option><option value="stock_report">Customer stock, rental, payment or due report</option><option value="raw_material_report">Raw-material receiving workbook</option><option value="document">Business Word document</option><option value="staff">Staff master data</option><option value="customer">Customer list</option><option value="product">Product list</option><option value="vendor">Vendor or supplier list</option></select></div>
             <div className="field"><label>Data file</label><input type="file" accept=".csv,.json,.xlsx,.xls,.xlsm,.docx" onChange={(event) => setFile(event.target.files?.[0])} /></div>
