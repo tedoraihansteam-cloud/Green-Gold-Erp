@@ -55,6 +55,8 @@ function Panel({ panel, values, onChange, onSave, message }) {
     </section>;
 }
 
+function OperationControls(){const {data,reload}=useApi('/settings/runtime');const [form,setForm]=useState(null),[message,setMessage]=useState('');useEffect(()=>{if(data?.controls)setForm(data.controls)},[data]);if(!form)return <section className="card">Loading operational controls…</section>;const change=(key,value)=>setForm(v=>({...v,[key]:value}));const save=async()=>{try{await api.put('/settings/operation_controls',form);setMessage('Saved operational controls');reload();}catch(e){setMessage(e.message)}};const startFinance=async()=>{if(!window.confirm('Start financial operations and permanently lock opening balances?'))return;try{const result=await api.post('/accounts/controls/start-financial-operations',{});setMessage(result.message);reload();}catch(e){setMessage(e.message)}};return <section className="card"><h2>Security, attendance and finance operation controls</h2><div className="form-grid"><div className="field"><label>Automatic logout after inactivity (minutes)</label><input type="number" min="1" max="1440" value={form.inactivityMinutes} onChange={e=>change('inactivityMinutes',Number(e.target.value))}/></div><div className="field"><label>Counted attendance starts</label><input type="time" value={form.attendanceStart} onChange={e=>change('attendanceStart',e.target.value)}/></div><div className="field"><label>Counted attendance ends</label><input type="time" value={form.attendanceEnd} onChange={e=>change('attendanceEnd',e.target.value)}/></div><div className="field"><label>Grace period (minutes)</label><input type="number" min="0" max="240" value={form.attendanceGraceMinutes} onChange={e=>change('attendanceGraceMinutes',Number(e.target.value))}/></div></div><p className="hint">Clock actions outside the window remain in the audit history but do not count as attendance. HR can regularize them through an approved correction.</p>{form.financeLiveAt?<div className="success-banner">Financial operations live since {new Date(form.financeLiveAt).toLocaleString()}. Opening balances are locked.</div>:<div className="error-banner">Setup mode: account opening balances remain editable until financial operations are started.</div>}{message&&<div className={/Saved|live|locked/i.test(message)?'success-banner':'error-banner'}>{message}</div>}<div className="form-actions"><button className="btn btn-primary" onClick={save}>Save controls</button>{!form.financeLiveAt&&<button className="btn btn-danger" onClick={startFinance}>Start financial operations</button>}</div></section>}
+
 function ApiConnections() {
     const { data, reload } = useApi('/integrations/connections');
     const blank = { name: '', baseUrl: '', authType: 'none', credential: '', headerName: 'X-API-Key', webhookUrl: '', healthPath: '', timeoutSeconds: 8, enabled: true };
@@ -172,7 +174,7 @@ export default function AppSettingsPage() {
         ['ai_integration', 'AI & document reading'], ['theme', 'Company theme'],
         ['language', 'Language'], ['rental_penalty', 'Rental & penalty defaults'],
         ['barcode_print', 'QR & barcode printing'], ['notifications', 'Message alerts'],
-        ['devices', 'Integration & Device Hub']
+        ['devices', 'Integration & Device Hub'], ['operation_controls','Security, attendance & finance controls']
     ];
     if (!section) return <div><div className="card-header" style={{ marginBottom: 18 }}><div><h1 className="page-title">Application settings</h1><p className="card-subtitle">Select an individual company-wide setting to view or manage it.</p></div></div><div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(280px,1fr))' }}>{sections.map(([key, title]) => <button type="button" key={key} className="card" style={{ textAlign: 'left', cursor: 'pointer', minHeight: 105 }} onClick={() => navigate(key === 'devices' ? '/admin/integration-hub' : `/admin/settings/${key}`)}><h2 style={{ marginBottom: 6 }}>{title}</h2><span className="hint">Open settings</span></button>)}</div></div>;
     const selectedPanel = selectablePanels.find((p) => p.key === section);
@@ -182,6 +184,7 @@ export default function AppSettingsPage() {
         {section === 'api' && <ApiConnections />}
         {section === 'workflow' && <WorkflowSettings />}
         {section === 'upload' && <UniversalBulkImport />}
+        {section === 'operation_controls' && <OperationControls />}
         {selectedPanel && <Panel panel={selectedPanel} values={values[selectedPanel.key]} onChange={set} onSave={save} message={messages[selectedPanel.key]} />}
         {!sections.some(([key]) => key === section) && <div className="error-banner">This settings section does not exist.</div>}
     </div>;

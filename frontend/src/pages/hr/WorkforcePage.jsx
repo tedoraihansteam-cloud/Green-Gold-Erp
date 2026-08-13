@@ -83,8 +83,8 @@ export default function WorkforcePage() {
         setBusy(true);
         setMessage('');
         try {
-            await api.post(`/workforce/attendance/${action}`, attendanceForm);
-            setMessage(action === 'clock-in' ? 'Attendance started successfully.' : 'Attendance closed successfully.');
+            const result=await api.post(`/workforce/attendance/${action}`, attendanceForm);
+            setMessage(result.message || (action === 'clock-in' ? 'Attendance started successfully.' : 'Attendance closed successfully.'));
             refreshAll();
         } catch (actionError) {
             setMessage(actionError.message);
@@ -203,6 +203,7 @@ export default function WorkforcePage() {
             {error ? <div className="error-banner">{error}</div> : null}
             {message ? <div className={/success|assigned|started|stopped|closed/i.test(message) ? 'success-banner' : 'error-banner'}>{message}</div> : null}
             {data?.currentSession&&new Date(data.currentSession.attendance_date).toDateString()!==new Date().toDateString()?<div className="error-banner">An earlier attendance session is still open from {new Date(data.currentSession.clock_in_at).toLocaleString()}. Clock out to close it before starting a new session.</div>:null}
+            {data?.attendancePolicy?<div className="info-banner">Counted attendance window: {data.attendancePolicy.start}–{data.attendancePolicy.end} ({data.attendancePolicy.timezone}). Clock actions outside the window are retained but not counted.</div>:null}
 
             {!loading ? (
                 <div className="stat-grid">

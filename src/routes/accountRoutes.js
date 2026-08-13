@@ -9,6 +9,8 @@ router.use(requireAuth);
 
 router.get('/', requirePermission('ACCOUNTS_VIEW'), asyncHandler(accountController.listAccounts));
 router.post('/', requirePermission('ACCOUNTS_CREATE'), asyncHandler(accountController.createAccount));
+router.put('/:businessId', requirePermission('ACCOUNTS_CREATE'), asyncHandler(accountController.updateAccount));
+router.post('/controls/start-financial-operations', requirePermission('ACCOUNTS_APPROVE'), asyncHandler(accountController.startFinancialOperations));
 router.get('/balance-sheet', requirePermission('ACCOUNTS_VIEW'), asyncHandler(accountController.dailyBalanceSheet));
 router.get('/pending-actions', requirePermission('ACCOUNTS_VIEW'), asyncHandler(accountController.pendingFinancialActions));
 router.get('/:businessId/statement', requirePermission('ACCOUNTS_VIEW'), asyncHandler(accountController.getAccountStatement));

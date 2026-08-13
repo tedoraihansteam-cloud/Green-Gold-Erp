@@ -105,6 +105,7 @@ export default function Layout() {
     const [previewPrefs, setPreviewPrefs] = useState(() => { try { return JSON.parse(localStorage.getItem('ggerp:appearance') || 'null'); } catch { return null; } });
     const { data: profileData } = useApi('/users/me');
     const { data: companyData } = useApi('/company-settings');
+    const { data: runtimeData } = useApi('/settings/runtime');
     const effectivePrefs = { ...(profileData?.profile?.preferences || {}), ...(previewPrefs || {}) };
     const locale=effectivePrefs.locale||'en-BD';const tr=(value)=>locale==='bn-BD'?(BN[value]||value):value;
 
@@ -151,6 +152,14 @@ export default function Layout() {
         }, 220);
         return () => { active = false; clearTimeout(timer); };
     }, [commandOpen, commandQuery]);
+
+    useEffect(() => {
+        const minutes=Number(runtimeData?.controls?.inactivityMinutes||15);
+        let timer;
+        const reset=()=>{window.clearTimeout(timer);timer=window.setTimeout(()=>{logout();navigate('/login',{replace:true,state:{message:`Signed out after ${minutes} minutes of inactivity.`}});},minutes*60000);};
+        const events=['pointerdown','keydown','scroll','touchstart'];events.forEach(name=>window.addEventListener(name,reset,{passive:true}));reset();
+        return()=>{window.clearTimeout(timer);events.forEach(name=>window.removeEventListener(name,reset));};
+    },[runtimeData,logout,navigate]);
 
     const handleLogout = () => { logout(); navigate('/login'); };
     const toggleSidebar = () => {

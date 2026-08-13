@@ -155,13 +155,14 @@ async function updateReview(req, res) {
                 ...current.extraction_result,
                 sections: (current.extraction_result.sections || []).map((section) => ({
                     ...section,
-                    postingOptions: requestedSections.get(section.id)?.postingOptions || section.postingOptions || {}
+                    postingOptions: requestedSections.get(section.id)?.postingOptions || section.postingOptions || {},
+                    postingIntent: requestedSections.get(section.id)?.postingIntent || section.postingIntent || 'reference'
                 }))
             };
         }
         revised = recalculateMultiDomainReview(requested);
     }
-    const editableStatuses = current.final_approved_at ? ['partially_posted', 'posting_failed'] : ['review'];
+    const editableStatuses = current.final_approved_at ? ['submitted','partially_posted', 'posting_failed'] : ['review'];
     const { rows } = await query(`UPDATE bulk_import_jobs SET field_mapping=COALESCE($1,field_mapping),submission_options=COALESCE($2,submission_options),extraction_result=COALESCE($3::jsonb,extraction_result),source_summary=COALESCE($4::jsonb,source_summary),routing_plan=COALESCE($5::jsonb,routing_plan),validation_errors=COALESCE($6::jsonb,validation_errors) WHERE id=$7 AND status=ANY($8::text[]) RETURNING *`, [req.body.fieldMapping || null, req.body.submissionOptions || null, revised ? JSON.stringify(revised.extractionResult) : null, revised ? JSON.stringify(revised.sourceSummary) : null, revised ? JSON.stringify(revised.routingPlan) : null, revised ? JSON.stringify(revised.validationErrors) : null, current.id, editableStatuses]);
     if (!rows.length) return res.status(404).json({ error: 'Review job not found' });
     if(revised?.extractionResult?.mode==='multi_domain')await persistAliasDecisions(revised.extractionResult,req.user);
@@ -381,8 +382,8 @@ async function postManualEntities(client, job, user) {
     return generated;
 }
 async function routeApprovedMultiDomain(client, job, user) {
-    const sections = (job.extraction_result?.sections || []).filter((section) => section.selected);
-    const manualEntities = await postManualEntities(client, job, user);
+    const sections = (job.extraction_result?.sections || []).filter((section) => section.selected && section.postingIntent === 'operational');
+    const manualEntities = sections.length ? await postManualEntities(client, job, user) : [];
     const routed = manualEntities.length ? [{ sectionId: 'manual-entities', department: 'MASTER DATA', status: 'posted', records: manualEntities.length, result: { title: 'Manually defined entities', targetType: 'MASTER_DATA', generated: manualEntities } }] : [];
     for (let index = 0; index < sections.length; index++) {
         const section = sections[index], savepoint = `import_section_${index}`;
@@ -430,13 +431,10 @@ async function decideApproval(req, res) {
             const updated = (await client.query(`UPDATE bulk_import_jobs SET approval_step_index=$1,approval_notes=$2 WHERE id=$3 RETURNING *`, [index + 1, notes, job.id])).rows[0];
             return { job: updated, action: 'advanced', step, nextStep: steps[index + 1] };
         }
-        const routed = await routeApprovedMultiDomain(client, job, req.user);
-        const failed = routed.filter((item) => item.status === 'failed').length, posted = routed.filter((item) => item.status === 'posted').length;
-        const finalStatus = failed ? (posted ? 'partially_posted' : 'posting_failed') : 'submitted';
-        const summary = { selectedSections: routed.length, postedSections: posted, failedSections: failed, records: routed.reduce((sum, item) => sum + item.records, 0), routed };
-        const updated = (await client.query(`UPDATE bulk_import_jobs SET status=$1,final_approved_by=$2,final_approved_at=now(),approval_notes=$3,submission_result=$4::jsonb,submitted_by=$2,submitted_at=CASE WHEN $1='submitted' THEN now() ELSE submitted_at END WHERE id=$5 RETURNING *`, [finalStatus, req.user.id, notes, JSON.stringify(summary), job.id])).rows[0];
-        await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,$2,$3,'routed',$4,$5)`, [job.id, index, step.name, `${notes} Routed ${routed.length} section(s).`, req.user.id]);
-        return { job: updated, action: failed ? 'posting_failed' : 'posted', step, routed };
+        const summary = { referenceOnly: true, approvedSections: (job.extraction_result?.sections||[]).filter(x=>x.selected).length, postedSections: 0, records: (job.extraction_result?.sections||[]).filter(x=>x.selected).reduce((n,x)=>n+(x.records?.length||0),0), routed: [] };
+        const updated = (await client.query(`UPDATE bulk_import_jobs SET status='submitted',final_approved_by=$1,final_approved_at=now(),approval_notes=$2,submission_result=$3::jsonb,submitted_by=$1,submitted_at=now() WHERE id=$4 RETURNING *`, [req.user.id, notes, JSON.stringify(summary), job.id])).rows[0];
+        await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,$2,$3,'routed',$4,$5)`, [job.id, index, step.name, `${notes} Approved as a permanent reference. Operational posting requires a separate explicit selection.`, req.user.id]);
+        return { job: updated, action: 'reference_approved', step, routed: [] };
     });
     await logAction({ actorUserId: req.user.id, action: `BULK_IMPORT_${result.action.toUpperCase()}`, entityType: 'BULK_IMPORT', entityId: req.params.businessId, after: { notes, routed: result.routed?.length || 0 } });
     await registerGeneratedCodes(routedGeneratedEntities(result.routed));

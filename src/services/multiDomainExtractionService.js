@@ -36,7 +36,7 @@ function question(key, label, options, recommended = '', help = '') {
     return { key, label, type: 'select', required: true, options, value: recommended, help };
 }
 function makeSection({ type, title, sheetName, range, confidence, records, columns, summary, data = null, questions = [], selected = true, postingMode = 'review_only', warnings = [] }) {
-    const section = { id: `${safeId(sheetName)}-${safeId(type)}-${safeId(title)}`, type, title, sheetName, range, confidence, selected, postingMode, records, sourceSnapshot: JSON.parse(JSON.stringify(records || [])), columns, summary, data, questions, warnings };
+    const section = { id: `${safeId(sheetName)}-${safeId(type)}-${safeId(title)}`, type, title, sheetName, range, confidence, selected, postingMode, postingIntent: 'reference', records, sourceSnapshot: JSON.parse(JSON.stringify(records || [])), columns, summary, data, questions, warnings };
     section.periodKey = periodKey(`${sheetName} ${title}`);
     section.fingerprint = fingerprint({ type, periodKey: section.periodKey, records });
     return section;

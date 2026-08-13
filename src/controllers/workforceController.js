@@ -23,6 +23,12 @@ function locationValues(body) {
     return { latitude, longitude, locationAddress: body.locationAddress || null };
 }
 
+async function attendancePolicy(companyId) {
+    const row=(await query(`SELECT attendance_start,attendance_end,attendance_grace_minutes,attendance_timezone,attendance_working_days FROM company_operation_controls WHERE company_id=$1`,[companyId])).rows[0]||{};
+    return {start:String(row.attendance_start||'09:00').slice(0,5),end:String(row.attendance_end||'18:00').slice(0,5),graceMinutes:Number(row.attendance_grace_minutes||0),timezone:row.attendance_timezone||'Asia/Dhaka',workingDays:row.attendance_working_days||[1,2,3,4,5,6]};
+}
+function attendanceDecision(policy){const parts=new Intl.DateTimeFormat('en-GB',{timeZone:policy.timezone,weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date()),weekday={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6}[parts.find(x=>x.type==='weekday').value],minutes=Number(parts.find(x=>x.type==='hour').value)*60+Number(parts.find(x=>x.type==='minute').value),toMinutes=v=>Number(v.slice(0,2))*60+Number(v.slice(3,5));if(!policy.workingDays.includes(weekday))return {counted:false,status:'non_working_day'};if(minutes<toMinutes(policy.start))return {counted:false,status:'before_window'};if(minutes>toMinutes(policy.end))return {counted:false,status:'after_window'};return {counted:true,status:minutes>toMinutes(policy.start)+policy.graceMinutes?'late':'counted'};}
+
 async function myWorkspace(req, res) {
     const month = /^\d{4}-\d{2}$/.test(req.query.month || '')
         ? req.query.month
@@ -46,7 +52,7 @@ async function myWorkspace(req, res) {
             `SELECT COUNT(DISTINCT attendance_date)::int AS present_days,
                     ROUND((COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(clock_out_at,now())-clock_in_at))),0)/3600)::numeric,2) AS total_hours
              FROM staff_attendance_sessions
-             WHERE user_id=$1 AND to_char(attendance_date,'YYYY-MM')=$2`,
+             WHERE user_id=$1 AND is_counted=true AND to_char(attendance_date,'YYYY-MM')=$2`,
             [req.user.id, month]
         ),
         query(
@@ -82,6 +88,7 @@ async function myWorkspace(req, res) {
         ),
     ]);
 
+    const policy=await attendancePolicy(req.user.company_id);
     res.json({
         today: today.rows,
         currentSession: openAttendance.rows[0] || null,
@@ -90,6 +97,7 @@ async function myWorkspace(req, res) {
         tasks: tasks.rows,
         activeTask: activeTask.rows[0] || null,
         recentAttendance: recentAttendance.rows,
+        attendancePolicy: policy,
     });
 }
 
@@ -105,10 +113,11 @@ async function clockIn(req, res) {
         [req.user.id, req.user.company_id]
     );
     try {
+        const policy=await attendancePolicy(req.user.company_id),decision=attendanceDecision(policy);
         const { rows } = await query(
             `INSERT INTO staff_attendance_sessions(
-               company_id,user_id,attendance_mode,clock_in_ip,latitude,longitude,location_address,notes
-             ) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+               company_id,user_id,attendance_mode,clock_in_ip,latitude,longitude,location_address,notes,is_counted,attendance_status,policy_snapshot
+             ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb) RETURNING *`,
             [
                 req.user.company_id,
                 req.user.id,
@@ -118,10 +127,11 @@ async function clockIn(req, res) {
                 location.longitude,
                 location.locationAddress,
                 req.body.notes || null,
+                decision.counted,decision.status,JSON.stringify(policy)
             ]
         );
         await logAction({ actorUserId: req.user.id, action: 'ATTENDANCE_CLOCK_IN', entityType: 'ATTENDANCE', entityId: rows[0].id, after: { mode, ip: clientIp(req), ...location } });
-        return res.status(201).json({ session: rows[0] });
+        return res.status(201).json({ session: rows[0], counted:decision.counted, attendanceStatus:decision.status, message:decision.counted?'Attendance recorded.':'Clock-in retained as evidence but is outside the configured attendance window and is not counted.' });
     } catch (error) {
         if (error.code === '23505') return res.status(409).json({ error: 'You are already clocked in' });
         throw error;
