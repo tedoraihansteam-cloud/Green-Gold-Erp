@@ -38,6 +38,8 @@ function routedGeneratedEntities(routed = []) {
     }
     return entities;
 }
+const rowSourceKey=(row,index)=>String(row?.sourceRow??row?.sourceLine??index+1);
+async function preserveReferenceRows(client,job){for(const section of job.extraction_result?.sections||[]){for(let index=0;index<(section.records||[]).length;index++){const row=section.records[index],disposition=row.disposition||'historical_reference',effectiveDate=row.effectiveDate||row.date||row.transactionDate||row.paymentDate||row.receivedDate||null,status=disposition==='scheduled_future'?'pending':disposition==='excluded'?'excluded':'reference';await client.query(`INSERT INTO bulk_import_reference_rows(company_id,job_id,section_id,section_type,section_title,sheet_name,source_row,disposition,effective_date,record_data,posting_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11) ON CONFLICT(job_id,section_id,source_row) DO UPDATE SET disposition=EXCLUDED.disposition,effective_date=EXCLUDED.effective_date,record_data=EXCLUDED.record_data,posting_status=CASE WHEN bulk_import_reference_rows.posting_status='posted' THEN 'posted' ELSE EXCLUDED.posting_status END,updated_at=now()`,[job.company_id,job.id,section.id,section.type,section.title,section.sheetName,rowSourceKey(row,index),disposition,effectiveDate,JSON.stringify(row),status]);}}}
 
 function validateFlatRows(job, map) {
     const errors = [];
@@ -140,6 +142,7 @@ async function get(req, res) {
     if (!rows.length) return res.status(404).json({ error: 'Import job not found' });
     res.json({ job: await reviewContext(rows[0], req.user.company_id) });
 }
+async function referenceRegister(req,res){const values=[req.user.company_id],where=[`r.company_id=$1`];if(req.query.q){values.push(`%${String(req.query.q).trim()}%`);where.push(`(r.record_data::text ILIKE $${values.length} OR r.section_title ILIKE $${values.length} OR j.original_name ILIKE $${values.length})`);}if(req.query.disposition){values.push(req.query.disposition);where.push(`r.disposition=$${values.length}`);}const {rows}=await query(`SELECT r.*,j.business_id import_business_id,j.original_name FROM bulk_import_reference_rows r JOIN bulk_import_jobs j ON j.id=r.job_id WHERE ${where.join(' AND ')} ORDER BY r.effective_date DESC NULLS LAST,r.created_at DESC LIMIT 500`,values);res.json({rows});}
 async function updateReview(req, res) {
     const current = (await query(`SELECT * FROM bulk_import_jobs WHERE business_id=$1 AND company_id=$2 AND status IN('review','partially_posted','posting_failed')`, [req.params.businessId, req.user.company_id])).rows[0];
     if (!current) return res.status(404).json({ error: 'Review job not found' });
@@ -382,7 +385,7 @@ async function postManualEntities(client, job, user) {
     return generated;
 }
 async function routeApprovedMultiDomain(client, job, user) {
-    const sections = (job.extraction_result?.sections || []).filter((section) => section.selected && section.postingIntent === 'operational');
+    const sections = (job.extraction_result?.sections || []).filter((section) => section.selected && section.postingIntent === 'operational').map(section=>({...section,records:(section.records||[]).filter(row=>(row.disposition||'historical_reference')==='current_operational')})).filter(section=>section.records.length);
     const manualEntities = sections.length ? await postManualEntities(client, job, user) : [];
     const routed = manualEntities.length ? [{ sectionId: 'manual-entities', department: 'MASTER DATA', status: 'posted', records: manualEntities.length, result: { title: 'Manually defined entities', targetType: 'MASTER_DATA', generated: manualEntities } }] : [];
     for (let index = 0; index < sections.length; index++) {
@@ -431,6 +434,7 @@ async function decideApproval(req, res) {
             const updated = (await client.query(`UPDATE bulk_import_jobs SET approval_step_index=$1,approval_notes=$2 WHERE id=$3 RETURNING *`, [index + 1, notes, job.id])).rows[0];
             return { job: updated, action: 'advanced', step, nextStep: steps[index + 1] };
         }
+        await preserveReferenceRows(client,job);
         const summary = { referenceOnly: true, approvedSections: (job.extraction_result?.sections||[]).filter(x=>x.selected).length, postedSections: 0, records: (job.extraction_result?.sections||[]).filter(x=>x.selected).reduce((n,x)=>n+(x.records?.length||0),0), routed: [] };
         const updated = (await client.query(`UPDATE bulk_import_jobs SET status='submitted',final_approved_by=$1,final_approved_at=now(),approval_notes=$2,submission_result=$3::jsonb,submitted_by=$1,submitted_at=now() WHERE id=$4 RETURNING *`, [req.user.id, notes, JSON.stringify(summary), job.id])).rows[0];
         await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,$2,$3,'routed',$4,$5)`, [job.id, index, step.name, `${notes} Approved as a permanent reference. Operational posting requires a separate explicit selection.`, req.user.id]);
@@ -611,4 +615,4 @@ async function remove(req, res) {
     res.json({ message: 'Review import removed' });
 }
 
-module.exports = { upload, list, get, updateMapping: updateReview, submitForApproval, decideApproval, postApprovedResults, submit, template, remove };
+module.exports = { upload, list, get, referenceRegister, updateMapping: updateReview, submitForApproval, decideApproval, postApprovedResults, submit, template, remove };
