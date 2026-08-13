@@ -188,7 +188,7 @@ async function submitForApproval(req, res) {
         await client.query(`INSERT INTO bulk_import_approval_events(job_id,step_index,step_name,action,notes,actor_user_id) VALUES($1,0,$2,'submitted',$3,$4)`, [job.id, steps[0].name, req.body.notes || null, req.user.id]);
         return { job: updated, nextStep: steps[0] };
     });
-    if (result.validationErrors) return res.status(422).json({ error: 'Complete required routing questions before approval submission', validationErrors: result.validationErrors });
+    if (result.validationErrors) return res.status(422).json({ error: 'Complete the highlighted corrections required for the selected posting mode', validationErrors: result.validationErrors });
     await logAction({ actorUserId: req.user.id, action: 'BULK_IMPORT_APPROVAL_SUBMITTED', entityType: 'BULK_IMPORT', entityId: req.params.businessId });
     res.json({ job: await reviewContext(result.job, req.user.company_id), nextStep: result.nextStep, message: `Submitted to ${result.nextStep.name}` });
 }
